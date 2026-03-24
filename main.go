@@ -10,6 +10,7 @@ import (
 	"xpfarm/internal/modules"
 	"xpfarm/internal/plugin"
 	"xpfarm/internal/ui"
+	graphstore "xpfarm/internal/storage/graph"
 	"xpfarm/pkg/utils"
 
 	_ "xpfarm/internal/normalization/all" // register all adapters + enrichers
@@ -51,6 +52,9 @@ ____  ________________________
 	// 1. Initialize Database
 	utils.LogInfo("Initializing Database...")
 	database.InitDB(*debugMode)
+	if err := graphstore.Migrate(database.GetDB()); err != nil {
+		log.Fatalf("failed to migrate graph tables: %v", err)
+	}
 
 	// 2. Register built-in modules
 	modules.InitModules()

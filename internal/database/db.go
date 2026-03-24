@@ -77,6 +77,7 @@ func InitDB(debug bool) {
 		log.Fatal("failed to migrate repo scanner tables:", err)
 	}
 
+
 	// Seed default searches if none exist
 	var count int64
 	DB.Model(&SavedSearch{}).Count(&count)

@@ -25,6 +25,8 @@ import (
 	"xpfarm/internal/overlord"
 	"xpfarm/internal/plugin"
 	findingsrepo "xpfarm/internal/storage/findings"
+	"xpfarm/internal/graph"
+	graphstore "xpfarm/internal/storage/graph"
 	repo_scanner "xpfarm/internal/repo_scanner"
 	"xpfarm/internal/repos"
 	repostore "xpfarm/internal/storage/repos"
@@ -1913,6 +1915,98 @@ func StartServer(port string) error {
 		} else {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "asset name required"})
 		}
+	})
+
+	// -------------------------------------------------------------------------
+	// Scan Graph API
+	// -------------------------------------------------------------------------
+
+	// GET /graph — serve the interactive graph visualization page.
+	r.GET("/graph", func(c *gin.Context) {
+		c.HTML(http.StatusOK, "graph.html", getGlobalContext(gin.H{
+			"Page": "graph",
+		}))
+	})
+
+	// GET /api/graph — build and return the full ScanGraph as JSON.
+	// The freshly-built graph is saved as a snapshot for query helpers.
+	r.GET("/api/graph", func(c *gin.Context) {
+		g, err := graph.BuildGraph(c.Request.Context(), database.GetDB())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		// Save snapshot asynchronously — don't block the response.
+		go func() {
+			if saveErr := graphstore.SaveGraph(database.GetDB(), g); saveErr != nil {
+				utils.LogDebug("[graph] save snapshot: %v", saveErr)
+			}
+			_ = graphstore.PruneSnapshots(database.GetDB(), 5)
+		}()
+		c.JSON(http.StatusOK, g)
+	})
+
+	// GET /api/graph/nodes — return all nodes with optional ?type= filter.
+	r.GET("/api/graph/nodes", func(c *gin.Context) {
+		g, err := graph.BuildGraph(c.Request.Context(), database.GetDB())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		filter := c.Query("type")
+		nodes := g.Nodes
+		if filter != "" {
+			filtered := make([]graph.GraphNode, 0)
+			for _, n := range g.Nodes {
+				if string(n.Type) == filter {
+					filtered = append(filtered, n)
+				}
+			}
+			nodes = filtered
+		}
+		c.JSON(http.StatusOK, gin.H{"nodes": nodes, "count": len(nodes)})
+	})
+
+	// GET /api/graph/edges — return all edges with optional ?kind= filter.
+	r.GET("/api/graph/edges", func(c *gin.Context) {
+		g, err := graph.BuildGraph(c.Request.Context(), database.GetDB())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		filter := c.Query("kind")
+		edges := g.Edges
+		if filter != "" {
+			filtered := make([]graph.GraphEdge, 0)
+			for _, e := range g.Edges {
+				if e.Kind == filter {
+					filtered = append(filtered, e)
+				}
+			}
+			edges = filtered
+		}
+		c.JSON(http.StatusOK, gin.H{"edges": edges, "count": len(edges)})
+	})
+
+	// GET /api/graph/node/:id — return a single node from the latest snapshot.
+	r.GET("/api/graph/node/:id", func(c *gin.Context) {
+		node, err := graphstore.GetNodeByID(database.GetDB(), c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if node == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "node not found"})
+			return
+		}
+		// Also return connected edges from the latest snapshot.
+		edgesFrom, _ := graphstore.GetEdgesFrom(database.GetDB(), node.ID)
+		edgesTo, _ := graphstore.GetEdgesTo(database.GetDB(), node.ID)
+		c.JSON(http.StatusOK, gin.H{
+			"node":       node,
+			"edges_from": edgesFrom,
+			"edges_to":   edgesTo,
+		})
 	})
 
 	// Nuclei Templates

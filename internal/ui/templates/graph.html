@@ -1,0 +1,604 @@
+{{define "title"}}Scan Graph — XPFarm{{end}}
+{{define "content"}}
+<style>
+    /* Override main-content padding for full-height canvas */
+    .main-content { padding: 0 !important; overflow: hidden !important; }
+
+    #graph-root {
+        display: flex;
+        height: 100vh;
+        width: 100%;
+        overflow: hidden;
+    }
+
+    /* ── Filter Panel ───────────────────────────────────────── */
+    #filter-panel {
+        width: 220px;
+        flex-shrink: 0;
+        background: var(--bg-sidebar);
+        border-right: 1px solid var(--border-color);
+        display: flex;
+        flex-direction: column;
+        padding: 20px 15px;
+        overflow-y: auto;
+        gap: 16px;
+    }
+
+    #filter-panel h3 {
+        margin: 0;
+        font-size: 0.85rem;
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+        color: var(--color-muted);
+    }
+
+    .filter-group { display: flex; flex-direction: column; gap: 6px; }
+
+    .filter-label {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 0.88rem;
+        cursor: pointer;
+        color: var(--color-text);
+    }
+
+    .filter-label input[type=checkbox] { accent-color: var(--color-primary); }
+
+    .node-dot {
+        width: 12px; height: 12px;
+        border-radius: 2px;
+        flex-shrink: 0;
+    }
+
+    .graph-stat {
+        background: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-radius: 6px;
+        padding: 10px 12px;
+    }
+
+    .graph-stat-val { font-size: 1.4rem; font-weight: 700; color: var(--color-text); }
+    .graph-stat-lbl { font-size: 0.75rem; color: var(--color-muted); }
+
+    .stats-grid-sm {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+    }
+
+    #reload-btn {
+        background: var(--color-primary);
+        color: #fff;
+        border: none;
+        border-radius: 6px;
+        padding: 8px 12px;
+        font-size: 0.85rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background 0.2s;
+    }
+
+    #reload-btn:hover { background: #7c3aed; }
+    #reload-btn:disabled { background: #4c4c4c; cursor: not-allowed; }
+
+    /* ── Canvas ─────────────────────────────────────────────── */
+    #cy {
+        flex: 1;
+        background: #07080a;
+        position: relative;
+    }
+
+    #cy-loading {
+        position: absolute;
+        top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+        color: var(--color-muted);
+        font-size: 0.95rem;
+        pointer-events: none;
+    }
+
+    /* ── Detail Panel ───────────────────────────────────────── */
+    #detail-panel {
+        width: 300px;
+        flex-shrink: 0;
+        background: var(--bg-sidebar);
+        border-left: 1px solid var(--border-color);
+        display: none;
+        flex-direction: column;
+        overflow: hidden;
+    }
+
+    #detail-panel.open { display: flex; }
+
+    #detail-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 14px 16px;
+        border-bottom: 1px solid var(--border-color);
+    }
+
+    #detail-title {
+        font-size: 0.9rem;
+        font-weight: 600;
+        color: var(--color-text);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+
+    #detail-close {
+        background: none;
+        border: none;
+        color: var(--color-muted);
+        cursor: pointer;
+        font-size: 1.2rem;
+        padding: 0 4px;
+        line-height: 1;
+    }
+
+    #detail-close:hover { color: var(--color-text); }
+
+    #detail-body {
+        flex: 1;
+        overflow-y: auto;
+        padding: 16px;
+    }
+
+    .detail-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        padding: 6px 0;
+        border-bottom: 1px solid rgba(255,255,255,0.04);
+        font-size: 0.82rem;
+        gap: 8px;
+    }
+
+    .detail-row:last-child { border-bottom: none; }
+
+    .detail-key {
+        color: var(--color-muted);
+        white-space: nowrap;
+        flex-shrink: 0;
+    }
+
+    .detail-val {
+        color: var(--color-text);
+        text-align: right;
+        word-break: break-all;
+    }
+
+    .detail-section-title {
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+        color: var(--color-muted);
+        margin: 14px 0 6px;
+    }
+
+    .type-badge {
+        display: inline-block;
+        padding: 2px 8px;
+        border-radius: 10px;
+        font-size: 0.72rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+
+    .sev-critical { background: rgba(220,38,38,0.18); color: #f87171; border: 1px solid rgba(220,38,38,0.3); }
+    .sev-high     { background: rgba(239,68,68,0.18); color: #fca5a5; border: 1px solid rgba(239,68,68,0.3); }
+    .sev-medium   { background: rgba(245,158,11,0.18); color: #fcd34d; border: 1px solid rgba(245,158,11,0.3); }
+    .sev-low      { background: rgba(16,185,129,0.18); color: #6ee7b7; border: 1px solid rgba(16,185,129,0.3); }
+    .sev-info     { background: rgba(148,163,184,0.18); color: #94a3b8; border: 1px solid rgba(148,163,184,0.3); }
+</style>
+
+<div id="graph-root">
+    <!-- ── Left Filter Panel ── -->
+    <div id="filter-panel">
+        <h3>Scan Graph</h3>
+
+        <button id="reload-btn" onclick="loadGraph()">⟳ Rebuild Graph</button>
+
+        <div>
+            <h3 style="margin-bottom:8px;">Node Types</h3>
+            <div class="filter-group" id="type-filters">
+                <label class="filter-label">
+                    <input type="checkbox" value="asset"   checked onchange="applyFilters()">
+                    <span class="node-dot" style="background:#8b5cf6;"></span> Asset
+                </label>
+                <label class="filter-label">
+                    <input type="checkbox" value="target"  checked onchange="applyFilters()">
+                    <span class="node-dot" style="background:#0ea5e9;"></span> Target
+                </label>
+                <label class="filter-label">
+                    <input type="checkbox" value="service" checked onchange="applyFilters()">
+                    <span class="node-dot" style="background:#10b981;"></span> Service
+                </label>
+                <label class="filter-label">
+                    <input type="checkbox" value="tech"    checked onchange="applyFilters()">
+                    <span class="node-dot" style="background:#f59e0b;"></span> Technology
+                </label>
+                <label class="filter-label">
+                    <input type="checkbox" value="vuln"    checked onchange="applyFilters()">
+                    <span class="node-dot" style="background:#ef4444;"></span> Vulnerability
+                </label>
+                <label class="filter-label">
+                    <input type="checkbox" value="exploit" checked onchange="applyFilters()">
+                    <span class="node-dot" style="background:#dc2626;"></span> Exploit
+                </label>
+            </div>
+        </div>
+
+        <div>
+            <h3 style="margin-bottom:8px;">Vuln Severity</h3>
+            <div class="filter-group" id="sev-filters">
+                <label class="filter-label">
+                    <input type="checkbox" value="critical" checked onchange="applyFilters()"> Critical
+                </label>
+                <label class="filter-label">
+                    <input type="checkbox" value="high" checked onchange="applyFilters()"> High
+                </label>
+                <label class="filter-label">
+                    <input type="checkbox" value="medium" checked onchange="applyFilters()"> Medium
+                </label>
+                <label class="filter-label">
+                    <input type="checkbox" value="low" checked onchange="applyFilters()"> Low
+                </label>
+                <label class="filter-label">
+                    <input type="checkbox" value="info" checked onchange="applyFilters()"> Info
+                </label>
+            </div>
+        </div>
+
+        <div>
+            <h3 style="margin-bottom:8px;">Edge Kind</h3>
+            <div class="filter-group" id="edge-filters">
+                <label class="filter-label">
+                    <input type="checkbox" value="owns"        checked onchange="applyFilters()"> owns
+                </label>
+                <label class="filter-label">
+                    <input type="checkbox" value="exposes"     checked onchange="applyFilters()"> exposes
+                </label>
+                <label class="filter-label">
+                    <input type="checkbox" value="runs"        checked onchange="applyFilters()"> runs
+                </label>
+                <label class="filter-label">
+                    <input type="checkbox" value="affected-by" checked onchange="applyFilters()"> affected-by
+                </label>
+                <label class="filter-label">
+                    <input type="checkbox" value="exploits"    checked onchange="applyFilters()"> exploits
+                </label>
+            </div>
+        </div>
+
+        <div id="graph-stats" style="display:none;">
+            <h3 style="margin-bottom:8px;">Stats</h3>
+            <div class="stats-grid-sm" id="stats-grid"></div>
+        </div>
+    </div>
+
+    <!-- ── Main Canvas ── -->
+    <div style="position:relative; flex:1; overflow:hidden;">
+        <div id="cy"></div>
+        <div id="cy-loading">Loading graph…</div>
+    </div>
+
+    <!-- ── Detail Panel ── -->
+    <div id="detail-panel">
+        <div id="detail-header">
+            <span id="detail-title">Node Details</span>
+            <button id="detail-close" onclick="closeDetail()">×</button>
+        </div>
+        <div id="detail-body"></div>
+    </div>
+</div>
+
+<script src="https://unpkg.com/cytoscape@3.29.2/dist/cytoscape.min.js"></script>
+<script>
+// ── Colour / shape palette keyed by node type ──────────────────────────────
+const NODE_STYLE = {
+    asset:   { bg: '#8b5cf6', border: '#7c3aed', shape: 'hexagon'   },
+    target:  { bg: '#0ea5e9', border: '#0284c7', shape: 'ellipse'   },
+    service: { bg: '#10b981', border: '#059669', shape: 'diamond'   },
+    tech:    { bg: '#f59e0b', border: '#d97706', shape: 'rectangle' },
+    vuln:    { bg: '#ef4444', border: '#dc2626', shape: 'triangle'  },
+    exploit: { bg: '#dc2626', border: '#991b1b', shape: 'star'      },
+};
+
+const EDGE_COLOR = {
+    'owns':        '#8b5cf6',
+    'exposes':     '#0ea5e9',
+    'runs':        '#10b981',
+    'affected-by': '#ef4444',
+    'exploits':    '#dc2626',
+};
+
+let cy = null;          // Cytoscape instance
+let rawGraph = null;    // Full graph from API
+
+// ── Bootstrap ─────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', loadGraph);
+
+async function loadGraph() {
+    const btn = document.getElementById('reload-btn');
+    const loading = document.getElementById('cy-loading');
+    btn.disabled = true;
+    btn.textContent = '⟳ Loading…';
+    loading.style.display = 'block';
+    closeDetail();
+
+    try {
+        const resp = await fetch('/api/graph');
+        if (!resp.ok) throw new Error(await resp.text());
+        rawGraph = await resp.json();
+        renderGraph(rawGraph);
+        renderStats(rawGraph);
+    } catch (err) {
+        loading.textContent = 'Error: ' + err.message;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = '⟳ Rebuild Graph';
+    }
+}
+
+// ── Render ─────────────────────────────────────────────────────────────────
+function renderGraph(g) {
+    const loading = document.getElementById('cy-loading');
+    loading.style.display = 'none';
+
+    const elements = buildElements(g);
+
+    if (cy) {
+        cy.destroy();
+    }
+
+    cy = cytoscape({
+        container: document.getElementById('cy'),
+        elements,
+        style: buildStylesheet(),
+        layout: {
+            name: 'breadthfirst',
+            directed: true,
+            spacingFactor: 1.4,
+            avoidOverlap: true,
+            padding: 40,
+        },
+        wheelSensitivity: 0.3,
+        minZoom: 0.05,
+        maxZoom: 4,
+    });
+
+    cy.on('tap', 'node', function(evt) {
+        showNodeDetail(evt.target.data());
+    });
+
+    cy.on('tap', function(evt) {
+        if (evt.target === cy) closeDetail();
+    });
+}
+
+// ── Element builder (applies active filters) ──────────────────────────────
+function buildElements(g) {
+    const activeTypes = getActiveValues('type-filters');
+    const activeSevs  = getActiveValues('sev-filters');
+    const activeEdges = getActiveValues('edge-filters');
+
+    const visibleNodeIDs = new Set();
+
+    const nodes = (g.nodes || [])
+        .filter(n => {
+            if (!activeTypes.has(n.type)) return false;
+            // For vuln nodes, also filter by severity
+            if (n.type === 'vuln' || n.type === 'exploit') {
+                const sev = (n.data && n.data.severity || 'info').toLowerCase();
+                if (!activeSevs.has(sev)) return false;
+            }
+            return true;
+        })
+        .map(n => {
+            visibleNodeIDs.add(n.id);
+            return { data: { id: n.id, label: truncate(n.label, 22), type: n.type, nodeData: n.data } };
+        });
+
+    const edges = (g.edges || [])
+        .filter(e => visibleNodeIDs.has(e.from) && visibleNodeIDs.has(e.to) && activeEdges.has(e.kind))
+        .map(e => ({ data: { id: e.id, source: e.from, target: e.to, kind: e.kind } }));
+
+    return [...nodes, ...edges];
+}
+
+// ── Stylesheet ─────────────────────────────────────────────────────────────
+function buildStylesheet() {
+    const nodeStyles = Object.entries(NODE_STYLE).map(([type, s]) => ({
+        selector: `node[type="${type}"]`,
+        style: {
+            'background-color': s.bg,
+            'border-color': s.border,
+            'border-width': 2,
+            'shape': s.shape,
+            'width': type === 'asset' ? 54 : type === 'exploit' ? 44 : 38,
+            'height': type === 'asset' ? 54 : type === 'exploit' ? 44 : 38,
+            'label': 'data(label)',
+            'color': '#e2e8f0',
+            'font-size': '10px',
+            'font-family': 'Inter, sans-serif',
+            'text-valign': 'bottom',
+            'text-margin-y': 4,
+            'text-outline-width': 2,
+            'text-outline-color': '#07080a',
+        }
+    }));
+
+    const edgeStyles = Object.entries(EDGE_COLOR).map(([kind, color]) => ({
+        selector: `edge[kind="${kind}"]`,
+        style: {
+            'line-color': color,
+            'target-arrow-color': color,
+            'opacity': 0.7,
+        }
+    }));
+
+    return [
+        {
+            selector: 'node',
+            style: {
+                'border-width': 2,
+                'transition-property': 'border-width, border-color',
+                'transition-duration': '0.15s',
+            }
+        },
+        {
+            selector: 'node:selected',
+            style: { 'border-width': 4, 'border-color': '#fff' }
+        },
+        {
+            selector: 'edge',
+            style: {
+                'width': 1.5,
+                'curve-style': 'bezier',
+                'target-arrow-shape': 'triangle',
+                'arrow-scale': 0.8,
+                'font-size': '9px',
+                'color': '#64748b',
+                'label': 'data(kind)',
+                'text-rotation': 'autorotate',
+                'text-margin-y': -6,
+                'font-family': 'Inter, sans-serif',
+                'text-outline-width': 2,
+                'text-outline-color': '#07080a',
+            }
+        },
+        ...nodeStyles,
+        ...edgeStyles,
+    ];
+}
+
+// ── Filters ────────────────────────────────────────────────────────────────
+function applyFilters() {
+    if (!rawGraph || !cy) return;
+    cy.destroy();
+    cy = null;
+    renderGraph(rawGraph);
+}
+
+function getActiveValues(containerId) {
+    const s = new Set();
+    document.querySelectorAll(`#${containerId} input[type=checkbox]:checked`).forEach(cb => s.add(cb.value));
+    return s;
+}
+
+// ── Detail Panel ──────────────────────────────────────────────────────────
+function showNodeDetail(nodeData) {
+    const panel = document.getElementById('detail-panel');
+    const title = document.getElementById('detail-title');
+    const body  = document.getElementById('detail-body');
+    const raw   = nodeData.nodeData || {};
+
+    title.textContent = nodeData.label;
+
+    let html = '';
+
+    // Type badge
+    const styles = NODE_STYLE[nodeData.type] || {};
+    html += `<div style="margin-bottom:12px;">
+        <span class="type-badge" style="background:${styles.bg}22;color:${styles.bg};border:1px solid ${styles.bg}44;">
+            ${nodeData.type}
+        </span>
+    </div>`;
+
+    // Severity badge for vuln/exploit
+    if (raw.severity) {
+        const sev = (raw.severity || '').toLowerCase();
+        html += `<div style="margin-bottom:12px;">
+            <span class="type-badge sev-${sev}">${sev}</span>
+        </div>`;
+    }
+
+    // KEV badge
+    if (raw.is_kev) {
+        html += `<div style="margin-bottom:12px;">
+            <span class="type-badge" style="background:rgba(220,38,38,0.2);color:#f87171;border:1px solid rgba(220,38,38,0.3);">⚑ CISA KEV</span>
+        </div>`;
+    }
+
+    // All data fields
+    html += '<div class="detail-section-title">Properties</div>';
+    for (const [k, v] of Object.entries(raw)) {
+        if (v === null || v === undefined || v === '' || v === false) continue;
+        if (k === 'severity') continue; // already shown as badge
+        const displayVal = typeof v === 'boolean' ? (v ? 'yes' : 'no') : String(v);
+        html += `<div class="detail-row">
+            <span class="detail-key">${k.replace(/_/g,' ')}</span>
+            <span class="detail-val">${escapeHtml(displayVal)}</span>
+        </div>`;
+    }
+
+    // Show links for targets (link to /target/{id})
+    if (nodeData.type === 'target' && raw.id) {
+        html += `<div style="margin-top:14px;">
+            <a href="/target/${raw.id}" style="color:var(--color-primary);font-size:0.85rem;">
+                Open Target Details →
+            </a>
+        </div>`;
+    }
+
+    // Show link for assets
+    if (nodeData.type === 'asset' && raw.id) {
+        html += `<div style="margin-top:14px;">
+            <a href="/asset/${raw.id}" style="color:var(--color-primary);font-size:0.85rem;">
+                Open Asset Overview →
+            </a>
+        </div>`;
+    }
+
+    body.innerHTML = html;
+    panel.classList.add('open');
+}
+
+function closeDetail() {
+    document.getElementById('detail-panel').classList.remove('open');
+    if (cy) cy.$(':selected').unselect();
+}
+
+// ── Stats ──────────────────────────────────────────────────────────────────
+function renderStats(g) {
+    const counts = {
+        Nodes:    (g.nodes || []).length,
+        Edges:    (g.edges || []).length,
+        Assets:   (g.nodes || []).filter(n => n.type === 'asset').length,
+        Targets:  (g.nodes || []).filter(n => n.type === 'target').length,
+        Services: (g.nodes || []).filter(n => n.type === 'service').length,
+        Techs:    (g.nodes || []).filter(n => n.type === 'tech').length,
+        Vulns:    (g.nodes || []).filter(n => n.type === 'vuln').length,
+        Exploits: (g.nodes || []).filter(n => n.type === 'exploit').length,
+    };
+
+    let html = '';
+    for (const [label, val] of Object.entries(counts)) {
+        html += `<div class="graph-stat">
+            <div class="graph-stat-val">${val}</div>
+            <div class="graph-stat-lbl">${label}</div>
+        </div>`;
+    }
+    document.getElementById('stats-grid').innerHTML = html;
+    document.getElementById('graph-stats').style.display = 'block';
+}
+
+// ── Utilities ─────────────────────────────────────────────────────────────
+function truncate(s, maxLen) {
+    if (!s) return '';
+    return s.length > maxLen ? s.slice(0, maxLen) + '…' : s;
+}
+
+function escapeHtml(s) {
+    return String(s)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+}
+</script>
+{{end}}
