@@ -18,6 +18,7 @@ https://play.google.com/store/apps/details?id=com.busyboxmodern.app&hl=en_CA
 | [Overlord - AI Binary Analysis](#overlord---ai-binary-analysis) | Built-in AI agent for binary/malware analysis |
 | [Plugin SDK](#plugin-sdk) | Community-extensible Tool, Agent, and Pipeline system |
 | [Finding Normalization Engine](#finding-normalization-engine) | Unified, enriched, deduplicated security findings |
+| [Repo Scanner](#repo-scanner) | Git repos as first-class scan targets: SAST, secrets, SBOM |
 | [What's New](#whats-new) | Security, reliability, and UX improvements |
 | [Setup](#setup) | Build and deployment instructions |
 | [TODO](#todo) | Planned features and roadmap |
@@ -74,6 +75,11 @@ flowchart TB
             A11["GET /api/findings"]
             A12["GET /api/findings/:id"]
             A13["GET /api/groups"]
+            A14["POST /api/repos/add"]
+            A15["GET /api/repos"]
+            A16["POST /api/repos/scan/:id"]
+            A17["GET /api/repos/:id/findings"]
+            A18["GET /api/repos/:id/sbom"]
         end
 
         GIN --> Pages
@@ -117,10 +123,12 @@ flowchart TB
         PR["Global registry<br/>RegisterTool / RegisterAgent / RegisterPipeline"]
         PL["plugins/all/all.go<br/>blank-import bootstrap"]
 
-        subgraph EXAMPLES["Bundled Example Plugins"]
+        subgraph EXAMPLES["Bundled Plugins"]
             direction LR
             EP1["example-echo<br/>EchoTool + EchoAgent"]
             EP2["example-repo-scanner<br/>RepoScannerTool + RepoScannerAgent"]
+            EP3["repo-semgrep<br/>SemgrepScannerTool + SemgrepAgent"]
+            EP4["repo-secrets<br/>SecretsScannerTool + SecretsAgent"]
         end
 
         PI --> PR
@@ -156,10 +164,29 @@ flowchart TB
         NP --> DD --> GR
     end
 
-    subgraph STORAGE["Storage - internal/storage/findings/"]
+    subgraph STORAGE["Storage - internal/storage/"]
         direction LR
         FR["FindingRecord<br/>SQLite/GORM<br/>upsert by fingerprint"]
         GRP["GroupRecord<br/>SQLite/GORM<br/>member IDs JSON array"]
+        RFR["RepoFindingRecord<br/>per-repo findings"]
+        RTR["RepoTargetRecord<br/>tracked git repos"]
+        SBOMR["SBOMRecord<br/>dependency snapshots"]
+    end
+
+    subgraph REPO_SCANNER["Repo Scanner - internal/repo_scanner/"]
+        direction TB
+        RS["ScanRepo()<br/>7-stage pipeline<br/>context-cancellable"]
+        subgraph REPO_STAGES["Stages"]
+            direction LR
+            RS1["Clone/Update<br/>--depth 1"]
+            RS2["Semgrep SAST<br/>--config auto"]
+            RS3["Gitleaks<br/>secret scan"]
+            RS4["SecretFinder<br/>40+ regex patterns"]
+            RS5["SBOM<br/>package.json/requirements.txt<br/>go.mod/pom.xml"]
+            RS6["EnrichAll<br/>CWE→CVSS→EPSS→KEV"]
+            RS7["Persist<br/>findings + SBOM"]
+        end
+        RS --> REPO_STAGES
     end
 
     subgraph DATABASE["Database - internal/database/"]
@@ -238,11 +265,17 @@ flowchart TB
     A11 --> STORAGE
     A12 --> STORAGE
     A13 --> STORAGE
+    A14 --> REPO_SCANNER
+    A15 --> REPO_SCANNER
+    A16 --> REPO_SCANNER
+    A17 --> REPO_SCANNER
+    A18 --> REPO_SCANNER
     SM -->|reads/writes| DB
     SM -->|SSE broadcast| A6
     SM -->|callbacks| N1
     SM -->|callbacks| N2
     NORM --> STORAGE
+    REPO_SCANNER --> STORAGE
     STORAGE --> DB
 ```
 
@@ -312,7 +345,13 @@ plugins/
 ├── example-echo/                 ← minimal starter template
 │   ├── plugin.go                 ← implement Tool/Agent, call Register* in init()
 │   └── plugin.yaml               ← name, version, author, description
-└── example-repo-scanner/         ← repo static-analysis example
+├── example-repo-scanner/         ← mock repo scanner example
+│   ├── plugin.go
+│   └── plugin.yaml
+├── repo-semgrep/                 ← Semgrep SAST plugin (production-ready)
+│   ├── plugin.go
+│   └── plugin.yaml
+└── repo-secrets/                 ← Gitleaks + SecretFinder plugin (production-ready)
     ├── plugin.go
     └── plugin.yaml
 ```
@@ -356,9 +395,46 @@ POST /api/normalize  {"source": "nuclei", "raw": {...}}
 | `GET /api/findings/:id` | Fetch a single finding by ID |
 | `GET /api/groups` | List finding groups with all member findings |
 
+## Repo Scanner
+
+Scan Git repositories as first-class targets. XPFarm clones the repo, runs all analysis stages, persists findings and a dependency SBOM, and exposes everything through a REST API.
+
+**7-stage pipeline:**
+
+```
+1. Clone / Update  → git clone --depth 1 (or fetch+reset if already present)
+2. Semgrep SAST    → --config auto (all community rules, 1000+ checks)
+3. Gitleaks        → commit history + working tree secret scan (if installed)
+4. SecretFinder    → 40+ built-in patterns: AWS, GitHub, Stripe, Slack, JWT, PEM, etc.
+5. SBOM            → parse package.json / requirements.txt / go.mod / pom.xml
+6. Enrich          → CWE → CVSS (NVD) → EPSS (FIRST.org) → KEV (CISA)
+7. Persist         → findings + SBOM snapshots in SQLite
+```
+
+**REST API:**
+
+| Endpoint | Description |
+|---|---|
+| `POST /api/repos/add` | Register a Git repo: `{"url": "…", "branch": "main"}` |
+| `GET /api/repos` | List all tracked repositories |
+| `DELETE /api/repos/:id` | Remove a repo and all its findings/SBOMs |
+| `POST /api/repos/scan/:id` | Trigger an async scan (returns 202 immediately) |
+| `GET /api/repos/:id/findings` | List findings — filter by `source`, `severity`, `cwe`, `cve`, `kev` |
+| `GET /api/repos/:id/sbom` | Latest SBOM — all detected dependencies with name, version, file, kind |
+
+**SBOM manifest support:**
+
+| File | Ecosystem | Captures |
+|---|---|---|
+| `package.json` | Node.js | `dependencies` + `devDependencies` |
+| `requirements.txt` | Python | PEP 440 version specifiers |
+| `go.mod` | Go | `require` blocks, direct + indirect |
+| `pom.xml` | Java/Maven | `<dependency>` blocks with groupId:artifactId, scope |
+
 ## What's New
 
-- **Plugin SDK** — community-extensible Tool / Agent / Pipeline system; add a plugin in 3 steps
+- **Repo Scanner** — Git repos as first-class targets; 7-stage pipeline (SAST, secrets, SBOM); full REST API; async scan with per-repo findings and SBOM snapshots
+- **Plugin SDK** — community-extensible Tool / Agent / Pipeline system; 2 production-ready repo scanner plugins (`repo-semgrep`, `repo-secrets`); add a plugin in 3 steps
 - **Finding Normalization Engine** — unified model across Nuclei, Nmap, Semgrep, Gitleaks; live CVSS/EPSS/KEV enrichment; SHA-256 dedup; CWE/CVE/severity grouping
 - **Secrets encrypted at rest** — API keys stored in SQLite are encrypted with AES-256-GCM. Key file auto-generated at `data/.xpfarm.key`, never committed
 - **Real-time scan progress** — Dashboard streams live stage updates via SSE instead of polling
@@ -407,7 +483,7 @@ go build -o xpfarm
 ## TODO
 
 - [ ] Custom model
-- [ ] SecretFinder JS
-- [ ] Repo detect/scan
 - [ ] Mobile scan
+- [ ] Repo Scanner UI — web page to add repos, trigger scans, view findings and SBOM
+- [ ] SBOM vulnerability matching — cross-reference SBOM dependencies against CVE/GHSA databases
 - [ ] Custom Module?
