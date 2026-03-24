@@ -19,6 +19,7 @@ https://play.google.com/store/apps/details?id=com.busyboxmodern.app&hl=en_CA
 | [Plugin SDK](#plugin-sdk) | Community-extensible Tool, Agent, and Pipeline system |
 | [Finding Normalization Engine](#finding-normalization-engine) | Unified, enriched, deduplicated security findings |
 | [Repo Scanner](#repo-scanner) | Git repos as first-class scan targets: SAST, secrets, SBOM |
+| [Scan Graph](#scan-graph) | Interactive graph of assets, services, vulns, and exploits |
 | [What's New](#whats-new) | Security, reliability, and UX improvements |
 | [Setup](#setup) | Build and deployment instructions |
 | [TODO](#todo) | Planned features and roadmap |
@@ -80,6 +81,11 @@ flowchart TB
             A16["POST /api/repos/scan/:id"]
             A17["GET /api/repos/:id/findings"]
             A18["GET /api/repos/:id/sbom"]
+            A19["GET /graph (page)"]
+            A20["GET /api/graph"]
+            A21["GET /api/graph/nodes"]
+            A22["GET /api/graph/edges"]
+            A23["GET /api/graph/node/:id"]
         end
 
         GIN --> Pages
@@ -171,6 +177,32 @@ flowchart TB
         RFR["RepoFindingRecord<br/>per-repo findings"]
         RTR["RepoTargetRecord<br/>tracked git repos"]
         SBOMR["SBOMRecord<br/>dependency snapshots"]
+    end
+
+    subgraph SCAN_GRAPH["Scan Graph - internal/graph/"]
+        direction TB
+        GB["BuildGraph(ctx, db)<br/>queries 5 tables<br/>deduplicates nodes/edges"]
+        subgraph GNODES["Node Types"]
+            direction LR
+            GN1["asset (#8b5cf6)"]
+            GN2["target (#0ea5e9)"]
+            GN3["service (#10b981)"]
+            GN4["tech (#f59e0b)"]
+            GN5["vuln (#ef4444)"]
+            GN6["exploit (#dc2626)"]
+        end
+        subgraph GEDGES["Edge Kinds"]
+            direction LR
+            GE1["owns"]
+            GE2["exposes"]
+            GE3["runs"]
+            GE4["affected-by"]
+            GE5["exploits"]
+        end
+        GSnapStore["GraphSnapshotRecord<br/>internal/storage/graph/<br/>SaveGraph / LoadLatest<br/>GetNodeByID / GetEdgesFrom"]
+        GB --> GNODES
+        GB --> GEDGES
+        GB --> GSnapStore
     end
 
     subgraph REPO_SCANNER["Repo Scanner - internal/repo_scanner/"]
@@ -270,6 +302,11 @@ flowchart TB
     A16 --> REPO_SCANNER
     A17 --> REPO_SCANNER
     A18 --> REPO_SCANNER
+    A19 --> SCAN_GRAPH
+    A20 --> SCAN_GRAPH
+    A21 --> SCAN_GRAPH
+    A22 --> SCAN_GRAPH
+    A23 --> SCAN_GRAPH
     SM -->|reads/writes| DB
     SM -->|SSE broadcast| A6
     SM -->|callbacks| N1
@@ -431,8 +468,70 @@ Scan Git repositories as first-class targets. XPFarm clones the repo, runs all a
 | `go.mod` | Go | `require` blocks, direct + indirect |
 | `pom.xml` | Java/Maven | `<dependency>` blocks with groupId:artifactId, scope |
 
+## Scan Graph
+
+XPFarm builds a unified directed graph of every entity discovered during scanning, making it trivial to answer questions like _"what services are running tech with an active CVE exploit?"_ or _"show me everything reachable from this asset"_.
+
+**Data model:**
+
+| Node | Color | Shape | Populated from |
+|---|---|---|---|
+| `asset` | `#8b5cf6` purple | hexagon | Asset table |
+| `target` | `#0ea5e9` blue | ellipse | Target table |
+| `service` | `#10b981` green | diamond | Port table (open ports) |
+| `tech` | `#f59e0b` amber | rectangle | WebAsset.TechStack + Port.Product |
+| `vuln` | `#ef4444` red | triangle | Vulnerability + CVE tables |
+| `exploit` | `#dc2626` dark-red | star | CVEs with `IsKEV=true` AND `HasPOC=true` |
+
+**Edge kinds:**
+
+| Edge | Meaning |
+|---|---|
+| `asset → target` owns | An asset owns a discovered target |
+| `target → service` exposes | A target has an open port/service |
+| `service → tech` runs | A service runs a detected technology |
+| `target → vuln` affected-by | A target has a vulnerability or CVE finding |
+| `vuln → exploit` exploits | A CVE has a known public exploit |
+
+**Example paths:**
+
+```
+example.com (asset)
+  └─owns──► www.example.com (target)
+              ├─exposes──► 443/tcp https (service)
+              │              └─runs──► nginx 1.24 (tech)
+              ├─affected-by──► CVE-2023-44487 (vuln)
+              │                   └─exploits──► Exploit: CVE-2023-44487 (exploit)
+              └─affected-by──► http-missing-security-headers (vuln)
+
+android-app.apk (asset)
+  └─owns──► apk://com.example.app (target)
+              ├─runs──► OkHttp (tech)
+              └─affected-by──► hardcoded-api-key (vuln)
+```
+
+**Visualization (`GET /graph`):**
+- Full-page interactive Cytoscape.js canvas — zoom, pan, drag
+- Left panel: filter by node type, vuln severity, edge kind
+- Click any node → right panel shows all properties + deep-link to asset/target detail page
+- Stats panel: node/edge counts per type
+- "Rebuild Graph" button re-queries live DB
+
+**REST API:**
+
+| Endpoint | Description |
+|---|---|
+| `GET /api/graph` | Full graph JSON; saves snapshot for query helpers |
+| `GET /api/graph/nodes?type=vuln` | Nodes, optional `?type=` filter |
+| `GET /api/graph/edges?kind=exploits` | Edges, optional `?kind=` filter |
+| `GET /api/graph/node/:id` | Single node + incoming/outgoing edges from latest snapshot |
+
+**React component (`ui/src/components/GraphView/`):**
+A standalone TypeScript component (`GraphView.tsx`) ships with the same capabilities — usable in any React 18 app with `npm install cytoscape @types/cytoscape`.
+
 ## What's New
 
+- **Scan Graph** — interactive Cytoscape.js visualization of assets→targets→services→techs→vulns→exploits; 5 edge kinds; filter by type/severity/kind; click-to-inspect side panel; REST API + React TSX component
 - **Repo Scanner** — Git repos as first-class targets; 7-stage pipeline (SAST, secrets, SBOM); full REST API; async scan with per-repo findings and SBOM snapshots
 - **Plugin SDK** — community-extensible Tool / Agent / Pipeline system; 2 production-ready repo scanner plugins (`repo-semgrep`, `repo-secrets`); add a plugin in 3 steps
 - **Finding Normalization Engine** — unified model across Nuclei, Nmap, Semgrep, Gitleaks; live CVSS/EPSS/KEV enrichment; SHA-256 dedup; CWE/CVE/severity grouping
