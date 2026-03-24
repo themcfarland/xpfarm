@@ -368,9 +368,11 @@ Overlord is a built-in AI agent powered by [OpenCode](https://opencode.ai) that 
 - **75 TypeScript tools** - radare2, Ghidra, Frida, binwalk, angr, Semgrep, Gitleaks, and more
 - **19 specialized agents** - binary RE, APK analysis, web testing, exploit generation, secrets hunting
 
-![Overlord Status](img/O_status.png)
+![Overlord Agents](img/O_agents.png)
 
-![Overlord Prompt](img/O_prompt.png)
+![Overlord Agents](img/O_agents2.png)
+
+![Overlord Tools](img/O_tools.png)
 
 ## Plugin SDK
 
@@ -578,6 +580,8 @@ go build -o xpfarm
 ![Port Scan](img/Port_Scan.png)
 
 ![Raw Logs](img/Raw_logs.png)
+
+![Modules](img/modules.png)
 
 ## TODO
 
