@@ -74,6 +74,29 @@ cmd_down() {
     echo -e "\033[1;32mEnvironment stopped.\033[0m"
 }
 
+cmd_update() {
+    require_docker
+    banner
+    echo -e "\033[1mRebuilding with @latest tool versions (opt-in upgrade)...\033[0m"
+    echo -e "\033[33mThis pulls the latest version of each security tool.\033[0m"
+    echo -e "\033[33mAfterward, update the ARG defaults in Dockerfile to lock in the new versions.\033[0m"
+    echo ""
+    docker compose build --no-cache \
+        --build-arg SUBFINDER_VERSION=latest \
+        --build-arg NAABU_VERSION=latest \
+        --build-arg HTTPX_VERSION=latest \
+        --build-arg KATANA_VERSION=latest \
+        --build-arg UNCOVER_VERSION=latest \
+        --build-arg URLFINDER_VERSION=latest \
+        --build-arg NUCLEI_VERSION=latest \
+        --build-arg CVEMAP_VERSION=latest \
+        --build-arg GOWITNESS_VERSION=latest \
+        --build-arg WAPPALYZER_VERSION=latest
+    echo ""
+    echo -e "\033[1;32mUpdate build complete!\033[0m"
+    echo -e "Run \033[1m./xpfarm.sh up\033[0m to start with updated tools."
+}
+
 cmd_help() {
     banner
     echo -e "Usage: \033[1m./xpfarm.sh\033[0m <command>"
@@ -83,12 +106,14 @@ cmd_help() {
     echo -e "  \033[1mup\033[0m          Start the environment (docker compose up)"
     echo -e "  \033[1monlyGo\033[0m      Compile and run Go binary directly (no Docker, no Overlord)"
     echo -e "  \033[1mdown\033[0m        Stop all Docker containers"
+    echo -e "  \033[1mupdate\033[0m      Rebuild containers with @latest tool versions (opt-in upgrade)"
     echo -e "  \033[1mhelp\033[0m        Show this help message"
     echo ""
     echo "Examples:"
     echo -e "  ./xpfarm.sh build        # Build containers"
     echo -e "  ./xpfarm.sh up           # Start full stack"
     echo -e "  ./xpfarm.sh onlyGo       # Dev mode, Go only"
+    echo -e "  ./xpfarm.sh update       # Upgrade all tools to latest"
 }
 
 case "${1:-help}" in
@@ -96,5 +121,6 @@ case "${1:-help}" in
     up)       cmd_up ;;
     onlyGo)   shift; cmd_onlygo "$@" ;;
     down)     cmd_down ;;
+    update)   cmd_update ;;
     help|*)   cmd_help ;;
 esac

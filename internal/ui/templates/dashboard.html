@@ -215,70 +215,109 @@
 </style>
 
 <script>
-    function fetchActiveScans() {
-        fetch('/api/scans')
-            .then(response => response.json())
-            .then(data => {
-                const list = document.getElementById('active-scans-list');
-                const countBadge = document.getElementById('scan-count');
-                const scans = data.active_scans || [];
+    // Real-time scan progress via SSE
+    const activeScans = {};
 
-                const dot = document.querySelector('.pulse-dot');
-
-                if (countBadge) countBadge.textContent = scans.length + " Running";
-
-                if (dot) {
-                    if (scans.length > 0) {
-                        dot.classList.add('active');
-                    } else {
-                        dot.classList.remove('active');
-                    }
-                }
-
-                if (list) {
-                    if (scans.length === 0) {
-                        list.innerHTML = '<p style="color: var(--color-muted); font-style: italic; font-size: 0.9rem;">No scans currently running.</p>';
-                        return;
-                    }
-
-                    let html = '';
-                    scans.forEach((scan, index) => {
-                        const safeId = 'scan-row-' + index;
-                        html += `
-                        <div class="scan-item" id="${safeId}">
-                            <div style="font-weight: 500;">
-                                <span style="color: var(--color-primary);">Scanning:</span> ${scan.target}
-                                <span style="font-size: 0.8em; color: var(--color-muted); margin-left: 5px;">(${scan.asset})</span>
-                            </div>
-                            <button onclick="stopScan('${scan.target}', '${safeId}')" class="btn exception-btn" style="padding: 4px 10px; font-size: 0.8rem; background: rgba(239, 68, 68, 0.1); color: #ef4444; border: 1px solid #ef4444;">
-                                Stop
-                            </button>
-                        </div>`;
-                    });
-                    list.innerHTML = html;
-                }
-            })
-            .catch(err => console.error('Error polling scans:', err));
+    function rowId(target) {
+        return 'scan-row-' + target.replace(/[^a-zA-Z0-9]/g, '_');
     }
 
-    function stopScan(target, rowId) {
-        if (!confirm('Stop scanning ' + target + '?')) return;
-        if (rowId) {
-            const row = document.getElementById(rowId);
-            if (row) row.style.display = 'none';
+    function updatePanel() {
+        const list = document.getElementById('active-scans-list');
+        const countBadge = document.getElementById('scan-count');
+        const dot = document.querySelector('.pulse-dot');
+        const keys = Object.keys(activeScans);
+
+        if (countBadge) countBadge.textContent = keys.length + ' Running';
+        if (dot) dot.classList.toggle('active', keys.length > 0);
+
+        if (!list) return;
+        if (keys.length === 0) {
+            list.innerHTML = '<p style="color: var(--color-muted); font-style: italic; font-size: 0.9rem;">No scans currently running.</p>';
+            return;
         }
+
+        const stageLabels = {
+            'subfinder': 'Stage 1 — Subdomain Discovery',
+            'filter':    'Stage 2 — Filtering Subdomains',
+            'port-scan': 'Stage 3 — Port Scanning',
+            'service-detection': 'Stage 4 — Service Detection',
+            'web-probe': 'Stage 5 — Web Probing',
+            'web-assets':'Stage 6 — Screenshots & Crawling',
+            'cve-lookup':'Stage 7 — CVE Lookup',
+            'vuln-scan': 'Stage 8 — Vulnerability Scan',
+        };
+
+        list.innerHTML = keys.map(target => {
+            const scan = activeScans[target];
+            const id = rowId(target);
+            const label = stageLabels[scan.stage] || (scan.stage ? scan.stage : 'Starting…');
+            const pct = scan.stageNum > 0 ? Math.round((scan.stageNum / 8) * 100) : 5;
+            return `
+            <div class="scan-item" id="${id}">
+                <div style="flex:1; min-width:0;">
+                    <div style="font-weight:500; margin-bottom:4px;">
+                        <span style="color:var(--color-primary);">Scanning:</span> ${target}
+                        <span style="font-size:0.8em; color:var(--color-muted); margin-left:5px;">(${scan.asset})</span>
+                    </div>
+                    <div style="font-size:0.78em; color:var(--color-secondary); margin-bottom:5px;">${label}</div>
+                    <div style="background:var(--bg-hover);border-radius:4px;height:4px;overflow:hidden;">
+                        <div style="height:100%;width:${pct}%;background:var(--color-primary);transition:width 0.4s ease;"></div>
+                    </div>
+                </div>
+                <button onclick="stopScan('${target}')" class="btn exception-btn" style="margin-left:12px;padding:4px 10px;font-size:0.8rem;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid #ef4444;flex-shrink:0;">
+                    Stop
+                </button>
+            </div>`;
+        }).join('');
+    }
+
+    function stopScan(target) {
+        if (!confirm('Stop scanning ' + target + '?')) return;
         fetch('/api/scan/stop', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ target: target })
-        })
-            .then(res => res.json())
-            .then(data => {
-                fetchActiveScans();
-            });
+        }).catch(err => console.error('Stop error:', err));
     }
 
-    fetchActiveScans();
+    // Seed with currently active scans (handles page load mid-scan)
+    fetch('/api/scans')
+        .then(r => r.json())
+        .then(data => {
+            (data.active_scans || []).forEach(s => {
+                activeScans[s.target] = { asset: s.asset, stage: '', stageNum: 0 };
+            });
+            updatePanel();
+        })
+        .catch(() => {});
+
+    // Subscribe to SSE for live updates
+    const evtSource = new EventSource('/api/scan/events');
+    evtSource.onmessage = function(e) {
+        const evt = JSON.parse(e.data);
+        if (evt.type === 'start') {
+            activeScans[evt.target] = { asset: evt.asset, stage: '', stageNum: 0 };
+        } else if (evt.type === 'stage') {
+            if (activeScans[evt.target]) {
+                activeScans[evt.target].stage = evt.stage;
+                activeScans[evt.target].stageNum = evt.stage_num;
+            }
+        } else if (evt.type === 'done') {
+            delete activeScans[evt.target];
+        }
+        updatePanel();
+    };
+    evtSource.onerror = function() {
+        // SSE connection lost — fall back to polling once
+        fetch('/api/scans').then(r => r.json()).then(data => {
+            Object.keys(activeScans).forEach(k => delete activeScans[k]);
+            (data.active_scans || []).forEach(s => {
+                activeScans[s.target] = { asset: s.asset, stage: '', stageNum: 0 };
+            });
+            updatePanel();
+        }).catch(() => {});
+    };
 </script>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>

@@ -78,11 +78,19 @@
         <h3>Results <span id="resultsCount" class="badge badge-cf">0</span></h3>
         <button type="button" class="btn btn-secondary btn-sm" onclick="exportCSV()" id="exportBtn" style="display:none;">Export CSV</button>
     </div>
+    <div id="truncationWarning" style="display:none; margin: 10px 0; padding: 10px 14px; background: rgba(234,179,8,0.15); border: 1px solid rgba(234,179,8,0.4); border-radius: 6px; color: #eab308; font-size: 0.85rem;">
+        Showing page <span id="currentPageLabel">1</span> of results. Use the pagination controls below to navigate.
+    </div>
     <div class="table-responsive">
         <table id="resultsTable">
             <thead id="resultsHead"><tr></tr></thead>
             <tbody id="resultsBody"></tbody>
         </table>
+    </div>
+    <div id="paginationControls" style="display:none; margin-top:14px; display:none; align-items:center; gap:10px;">
+        <button class="btn btn-secondary btn-sm" id="prevPageBtn" onclick="changePage(-1)" disabled>← Prev</button>
+        <span id="pageInfo" style="color:var(--color-muted); font-size:0.85rem;"></span>
+        <button class="btn btn-secondary btn-sm" id="nextPageBtn" onclick="changePage(1)">Next →</button>
     </div>
 </div>
 
@@ -410,13 +418,18 @@
     // -----------------------------------------------------------------------
     // Payload
     // -----------------------------------------------------------------------
-    function buildQueryPayload() {
+    let currentPage = 1;
+    const pageSize = 100;
+
+    function buildQueryPayload(page) {
         const rows = document.querySelectorAll('.rule-row');
         const payload = {
             source: currentSource,
             columns: Array.from(selectedColumns),
             distinct: document.getElementById('distinctToggle').checked,
-            rules: []
+            rules: [],
+            page: page || 1,
+            page_size: pageSize,
         };
         rows.forEach((row, idx) => {
             const rule = {};
@@ -432,18 +445,21 @@
     // -----------------------------------------------------------------------
     // Execute
     // -----------------------------------------------------------------------
-    async function executeSearch() {
-        const payload = buildQueryPayload();
+    async function executeSearch(page) {
+        currentPage = page || 1;
+        const payload = buildQueryPayload(currentPage);
         const resultsContainer = document.getElementById('resultsContainer');
         const thead = document.getElementById('resultsHead').querySelector('tr');
         const tbody = document.getElementById('resultsBody');
         const countSpan = document.getElementById('resultsCount');
         const exportBtn = document.getElementById('exportBtn');
+        const paginationControls = document.getElementById('paginationControls');
 
         tbody.innerHTML = '<tr><td colspan="99" style="text-align:center;">Searching...</td></tr>';
         thead.innerHTML = '';
         resultsContainer.style.display = 'block';
         exportBtn.style.display = 'none';
+        if (paginationControls) paginationControls.style.display = 'none';
 
         try {
             const res = await fetch('/api/search', {
@@ -456,15 +472,25 @@
                 throw new Error(errData.error || 'Search failed');
             }
             const data = await res.json();
-            countSpan.textContent = data.length || 0;
+            const rows = data.rows || [];
+            const totalRows = data.total_rows || 0;
+            const totalPages = Math.ceil(totalRows / pageSize);
 
-            if (!data || data.length === 0) {
+            const truncWarning = document.getElementById('truncationWarning');
+            const pageLabel = document.getElementById('currentPageLabel');
+            if (truncWarning) {
+                truncWarning.style.display = data.truncated ? 'block' : 'none';
+                if (pageLabel) pageLabel.textContent = currentPage + ' / ' + totalPages;
+            }
+            countSpan.textContent = rows.length + ' of ' + totalRows;
+
+            if (rows.length === 0) {
                 thead.innerHTML = '';
                 tbody.innerHTML = '<tr><td colspan="99" style="text-align:center;">No results found.</td></tr>';
                 return;
             }
 
-            const cols = payload.columns.length > 0 ? payload.columns : Object.keys(data[0]);
+            const cols = payload.columns.length > 0 ? payload.columns : Object.keys(rows[0]);
             thead.innerHTML = '';
             cols.forEach(col => {
                 const th = document.createElement('th');
@@ -473,7 +499,7 @@
             });
 
             tbody.innerHTML = '';
-            data.forEach(item => {
+            rows.forEach(item => {
                 const tr = document.createElement('tr');
                 cols.forEach(col => {
                     const td = document.createElement('td');
@@ -485,12 +511,24 @@
             });
 
             exportBtn.style.display = 'inline-block';
-            window._lastSearchData = data;
+            window._lastSearchData = rows;
             window._lastSearchCols = cols;
+
+            // Pagination controls
+            if (paginationControls && totalPages > 1) {
+                paginationControls.style.display = 'flex';
+                document.getElementById('prevPageBtn').disabled = currentPage <= 1;
+                document.getElementById('nextPageBtn').disabled = currentPage >= totalPages;
+                document.getElementById('pageInfo').textContent = 'Page ' + currentPage + ' of ' + totalPages + ' (' + totalRows + ' total)';
+            }
         } catch (e) {
             thead.innerHTML = '';
             tbody.innerHTML = '<tr><td colspan="99" style="color:red;text-align:center;">Error: ' + e.message + '</td></tr>';
         }
+    }
+
+    function changePage(delta) {
+        executeSearch(currentPage + delta);
     }
 
     // -----------------------------------------------------------------------

@@ -14,7 +14,7 @@ https://play.google.com/store/apps/details?id=com.busyboxmodern.app&hl=en_CA
 | [Wrapped Tools](#wrapped-tools) | The 10 open-source tools orchestrated by XPFarm |
 | [Architecture Map](#architecture-map) | Full system architecture, scan pipeline, data flow, and AI subsystem |
 | [Overlord - AI Binary Analysis](#overlord---ai-binary-analysis) | Built-in AI agent for binary/malware analysis |
-| [Setup](#setup) | Build and deployment instructions (Docker / source) |
+| [What's New](#whats-new) | Recent security, reliability, and UX improvements |
 | [Random Screenshots](#random-screenshots) | UI screenshots of scans and logs |
 | [TODO](#todo) | Planned features and roadmap |
 
@@ -305,12 +305,38 @@ Overlord is a built-in AI agent powered by [OpenCode](https://opencode.ai) that 
 
 ![Overlord Prompt](img/O_prompt.png)
 
+![Overlord Status](img/docker.png)
+
+## Random Screenshots
+
+![Dashboard](img/discord.png)
+
+![Set Target](img/Set_target.png)
+
+![Port Scan](img/Port_Scan.png)
+
+![Raw Logs](img/Raw_logs.png)
+
+## What's New
+
+- **Secrets encrypted at rest** — API keys stored in SQLite are encrypted with AES-256-GCM. A local key file (`data/.xpfarm.key`) is auto-generated on first run and never committed.
+- **Real-time scan progress** — Dashboard now streams live stage updates via SSE instead of polling. See exactly which pipeline stage is running and how far along the scan is.
+- **Search pagination** — Search results are paginated (100 rows/page) with a truncation warning when results exceed the limit.
+- **Goroutine panic recovery** — Panics in scan goroutines are caught, logged, and cleaned up gracefully instead of crashing the server.
+- **CSRF protection** — Cross-origin POST requests are rejected. XPFarm only accepts state-mutating requests from localhost.
+- **File upload hardening** — Binary uploads are capped at 500 MB and validated by MIME type before saving.
+- **Silent failure surfaces** — CSV import errors, Nuclei parse failures, and search truncation are now reported to the user.
+- **Tool version pinning** — All 10 security tools in the Dockerfile are pinned to specific versions. Use `./xpfarm.sh update` to opt-in to upgrades.
+- **DB connection tuning** — Connection pool increased to 10 concurrent readers; WAL journal size capped at 64 MB.
+- **N+1 dashboard query fix** — Asset target counts now use a single `GROUP BY` query instead of loading every target object.
+
 ## Setup
 
 ```bash
 # Using the helper scripts (recommended)
 ./xpfarm.sh build     # Build all containers
 ./xpfarm.sh up        # Start everything
+./xpfarm.sh update    # Rebuild with latest tool versions (opt-in upgrade)
 
 # Windows
 .\xpfarm.ps1 build
@@ -324,17 +350,6 @@ go build -o xpfarm
 ./xpfarm
 ./xpfarm -debug
 ```
-![Overlord Status](img/docker.png)
-
-## Random Screenshots
-
-![Dashboard](img/discord.png)
-
-![Set Target](img/Set_target.png)
-
-![Port Scan](img/Port_Scan.png)
-
-![Raw Logs](img/Raw_logs.png)
 
 ## TODO
 

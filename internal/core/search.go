@@ -1,10 +1,12 @@
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 	"xpfarm/internal/database"
@@ -23,9 +25,11 @@ type SearchRule struct {
 
 type SearchPayload struct {
 	Source   string       `json:"source"`
-	Columns []string     `json:"columns"`
-	Distinct bool        `json:"distinct"`
+	Columns  []string     `json:"columns"`
+	Distinct bool         `json:"distinct"`
 	Rules    []SearchRule `json:"rules"`
+	Page     int          `json:"page"`      // 1-based; defaults to 1
+	PageSize int          `json:"page_size"` // defaults to 100, capped at 1000
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +143,18 @@ type regexFilter struct {
 // GlobalSearch — pure regex engine
 // ---------------------------------------------------------------------------
 
-func GlobalSearch(payload SearchPayload) ([]map[string]interface{}, error) {
+// SearchResult wraps query results with pagination and truncation metadata.
+type SearchResult struct {
+	Rows      []map[string]interface{} `json:"rows"`
+	TotalRows int64                    `json:"total_rows"`
+	Page      int                      `json:"page"`
+	PageSize  int                      `json:"page_size"`
+	Truncated bool                     `json:"truncated"` // true when total_rows > page_size (more pages exist)
+}
+
+const searchLimit = 10000
+
+func GlobalSearch(payload SearchPayload) (*SearchResult, error) {
 	db := database.GetDB()
 	cat := catalog()
 
@@ -218,7 +233,27 @@ func GlobalSearch(payload SearchPayload) ([]map[string]interface{}, error) {
 	} else {
 		query = query.Select(selectStr)
 	}
-	query = query.Limit(10000)
+
+	// Count total matching rows (used for pagination metadata)
+	var totalRows int64
+	countQuery := db.Table(source).Where(source + ".deleted_at IS NULL")
+	countQuery = addJoins(countQuery, source, neededTables)
+	countQuery.Count(&totalRows)
+
+	// Resolve pagination params
+	pageSize := payload.PageSize
+	if pageSize <= 0 {
+		pageSize = 100
+	} else if pageSize > searchLimit {
+		pageSize = searchLimit
+	}
+	page := payload.Page
+	if page <= 0 {
+		page = 1
+	}
+	offset := (page - 1) * pageSize
+
+	query = query.Offset(offset).Limit(pageSize)
 
 	// Execute
 	rows, err := query.Rows()
@@ -272,15 +307,30 @@ func GlobalSearch(payload SearchPayload) ([]map[string]interface{}, error) {
 		allRows = explodePaths(allRows, "web.paths")
 	}
 
-	// Apply regex filters in Go
+	// Apply regex filters in Go with a timeout to guard against ReDoS
 	var results []map[string]interface{}
 	if len(filters) == 0 {
 		results = allRows
 	} else {
-		for _, row := range allRows {
-			if matchesFilters(row, filters) {
-				results = append(results, row)
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+
+		done := make(chan []map[string]interface{}, 1)
+		go func() {
+			var matched []map[string]interface{}
+			for _, row := range allRows {
+				if matchesFilters(row, filters) {
+					matched = append(matched, row)
+				}
 			}
+			done <- matched
+		}()
+
+		select {
+		case matched := <-done:
+			results = matched
+		case <-ctx.Done():
+			return nil, fmt.Errorf("search timed out — regex pattern may be too complex")
 		}
 	}
 
@@ -292,7 +342,13 @@ func GlobalSearch(payload SearchPayload) ([]map[string]interface{}, error) {
 		results = dedup(results, validCols)
 	}
 
-	return results, nil
+	return &SearchResult{
+		Rows:      results,
+		TotalRows: totalRows,
+		Page:      page,
+		PageSize:  pageSize,
+		Truncated: totalRows > int64(pageSize),
+	}, nil
 }
 
 // matchesFilters evaluates compiled regex rules with AND/OR chaining.

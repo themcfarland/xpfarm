@@ -25,6 +25,16 @@ type ScanInfo struct {
 	AssetName string
 }
 
+// ScanProgressEvent is sent over SSE to connected dashboard clients.
+type ScanProgressEvent struct {
+	Type     string `json:"type"`               // "start", "stage", "done"
+	Target   string `json:"target"`
+	Asset    string `json:"asset"`
+	Stage    string `json:"stage,omitempty"`    // human-readable stage name
+	StageNum int    `json:"stage_num,omitempty"`
+	Total    int    `json:"total,omitempty"`
+}
+
 type ScanManager struct {
 	mu          sync.Mutex
 	activeScans map[string]ScanInfo
@@ -32,6 +42,10 @@ type ScanManager struct {
 	// Optional callbacks — must hold mu or copy under mu before calling
 	onStart func(target string)
 	onStop  func(target string, cancelled bool)
+
+	// SSE subscriber channels for real-time dashboard updates
+	progressMu   sync.RWMutex
+	progressSubs map[chan ScanProgressEvent]struct{}
 }
 
 var currentManager *ScanManager
@@ -40,10 +54,50 @@ var managerOnce sync.Once
 func GetManager() *ScanManager {
 	managerOnce.Do(func() {
 		currentManager = &ScanManager{
-			activeScans: make(map[string]ScanInfo),
+			activeScans:  make(map[string]ScanInfo),
+			progressSubs: make(map[chan ScanProgressEvent]struct{}),
 		}
 	})
 	return currentManager
+}
+
+// Subscribe returns a buffered channel that will receive ScanProgressEvents.
+// The caller must call Unsubscribe when done to avoid leaking the channel.
+func (sm *ScanManager) Subscribe() chan ScanProgressEvent {
+	ch := make(chan ScanProgressEvent, 20)
+	sm.progressMu.Lock()
+	sm.progressSubs[ch] = struct{}{}
+	sm.progressMu.Unlock()
+	return ch
+}
+
+// Unsubscribe removes and closes a progress channel.
+func (sm *ScanManager) Unsubscribe(ch chan ScanProgressEvent) {
+	sm.progressMu.Lock()
+	delete(sm.progressSubs, ch)
+	sm.progressMu.Unlock()
+	close(ch)
+}
+
+// broadcastProgress fans out a progress event to all subscribers (non-blocking).
+// Slow subscribers are silently dropped to avoid stalling the scan pipeline.
+func (sm *ScanManager) broadcastProgress(target, asset, eventType, stage string, stageNum int) {
+	evt := ScanProgressEvent{
+		Type:     eventType,
+		Target:   target,
+		Asset:    asset,
+		Stage:    stage,
+		StageNum: stageNum,
+		Total:    8,
+	}
+	sm.progressMu.RLock()
+	defer sm.progressMu.RUnlock()
+	for ch := range sm.progressSubs {
+		select {
+		case ch <- evt:
+		default:
+		}
+	}
 }
 
 type ActiveScanData struct {
@@ -95,10 +149,14 @@ func (sm *ScanManager) StartScan(targetInput string, assetName string) {
 	if onStartFn != nil {
 		onStartFn(targetInput)
 	}
+	sm.broadcastProgress(targetInput, assetName, "start", "", 0)
 
 	// Run in background
 	go func() {
 		defer func() {
+			if r := recover(); r != nil {
+				utils.LogError("[Manager] Scan panic recovered for %s: %v", targetInput, r)
+			}
 			sm.mu.Lock()
 			delete(sm.activeScans, targetInput)
 			onStopFn := sm.onStop
@@ -108,6 +166,7 @@ func (sm *ScanManager) StartScan(targetInput string, assetName string) {
 				cancelled := ctx.Err() == context.Canceled
 				onStopFn(targetInput, cancelled)
 			}
+			sm.broadcastProgress(targetInput, assetName, "done", "", 0)
 		}()
 		sm.runScanLogic(ctx, targetInput, assetName)
 	}()
@@ -218,6 +277,7 @@ func (sm *ScanManager) runScanLogic(ctx context.Context, targetInput string, ass
 	}
 
 	// === STAGE 1: Subdomain Discovery (Subfinder — Synchronous) ===
+	sm.broadcastProgress(hostname, assetName, "stage", "subfinder", 1)
 	utils.LogInfo("[Scanner] Stage 1: Running Subfinder on %s", hostname)
 	var subdomains []string
 
@@ -246,6 +306,7 @@ func (sm *ScanManager) runScanLogic(ctx context.Context, targetInput string, ass
 	}
 
 	// === STAGE 2: Filter and Save newly found subdomains ===
+	sm.broadcastProgress(hostname, assetName, "stage", "filter", 2)
 	utils.LogInfo("[Scanner] Stage 2: Filtering and saving %d newly discovered subdomains", len(subdomains))
 
 	// First, check all newly-found subdomains and only save valid ones
@@ -420,6 +481,7 @@ func (sm *ScanManager) runScanLogic(ctx context.Context, targetInput string, ass
 						continue
 					}
 
+					sm.broadcastProgress(t.Value, assetName, "stage", "port-scan", 3)
 					var output string
 					var err error
 					if profile.EnablePortScan {
@@ -475,6 +537,7 @@ func (sm *ScanManager) runScanLogic(ctx context.Context, targetInput string, ass
 							utils.LogSuccess("[Scanner] [Naabu] Found %d open ports on %s", portsFound, t.Value)
 						}
 
+						sm.broadcastProgress(t.Value, assetName, "stage", "service-detection", 4)
 						// --- STAGE 3: Nmap Service Enumeration ---
 						var nResults []modules.NmapResult
 						if len(targetPorts) > 0 {
@@ -558,7 +621,8 @@ func (sm *ScanManager) runScanLogic(ctx context.Context, targetInput string, ass
 								utils.LogDebug("[Scanner] Prepared %d URLs for Httpx probing on %s", len(httpUrls), t.Value)
 
 								if len(httpUrls) > 0 {
-									utils.LogInfo("[Scanner] Triggering Httpx Stage 4 for %d URLs on %s", len(httpUrls), t.Value)
+									sm.broadcastProgress(t.Value, assetName, "stage", "web-probe", 5)
+							utils.LogInfo("[Scanner] Triggering Httpx Stage 4 for %d URLs on %s", len(httpUrls), t.Value)
 									httpxMod := modules.Get("httpx")
 									if hx, ok := httpxMod.(*modules.Httpx); ok && hx.CheckInstalled() {
 										webResults, httpxErr := hx.RunRich(ctx, httpUrls)
@@ -644,6 +708,7 @@ func (sm *ScanManager) runScanLogic(ctx context.Context, targetInput string, ass
 											urlInstalled := urlOk && urlMod.CheckInstalled() && profile.EnableWebUrlfinder
 
 											if gwInstalled || katInstalled || urlInstalled {
+												sm.broadcastProgress(t.Value, assetName, "stage", "web-assets", 6)
 												utils.LogInfo("[Scanner] Triggering parallel web asset processing for %d URLs on %s", count, t.Value)
 
 												var webWG sync.WaitGroup
@@ -657,6 +722,11 @@ func (sm *ScanManager) runScanLogic(ctx context.Context, targetInput string, ass
 													webWG.Add(1)
 													go func(webResult modules.HttpxResult) {
 														defer webWG.Done()
+														defer func() {
+															if r := recover(); r != nil {
+																utils.LogError("[Scanner] Web stage panic recovered for %s: %v", webResult.URL, r)
+															}
+														}()
 														sem <- struct{}{}
 														defer func() { <-sem }()
 
@@ -765,11 +835,13 @@ func (sm *ScanManager) runScanLogic(ctx context.Context, targetInput string, ass
 					}
 
 					if profile.EnableVulnScan {
+						sm.broadcastProgress(t.Value, assetName, "stage", "cve-lookup", 7)
 						// --- STAGE 7: CVE Lookup via Cvemap (Per-Worker/Per-Target) ---
 						if profile.EnableCvemap {
 							sm.runCvemapScan(ctx, db, t)
 						}
 
+						sm.broadcastProgress(t.Value, assetName, "stage", "vuln-scan", 8)
 						// --- STAGE 8: Nuclei Vulnerability Scanning (Per-Port) ---
 						if profile.EnableNuclei {
 							sm.runNucleiScan(ctx, db, t)
@@ -1179,6 +1251,7 @@ func (sm *ScanManager) parseAndStoreNucleiResults(db *gorm.DB, targetID uint, ou
 	}
 
 	count := 0
+	skipped := 0
 	seen := make(map[string]bool) // Deduplicate by template-id + matched-at
 
 	for _, line := range strings.Split(output, "\n") {
@@ -1189,6 +1262,8 @@ func (sm *ScanManager) parseAndStoreNucleiResults(db *gorm.DB, targetID uint, ou
 
 		var result modules.NucleiResult
 		if err := json.Unmarshal([]byte(line), &result); err != nil {
+			utils.LogDebug("[Scanner] [Nuclei] Skipping malformed JSONL line: %v (%.80s)", err, line)
+			skipped++
 			continue
 		}
 
@@ -1226,6 +1301,9 @@ func (sm *ScanManager) parseAndStoreNucleiResults(db *gorm.DB, targetID uint, ou
 		count++
 	}
 
+	if skipped > 0 {
+		utils.LogDebug("[Scanner] [Nuclei] %d malformed JSONL lines skipped for target %d", skipped, targetID)
+	}
 	return count
 }
 

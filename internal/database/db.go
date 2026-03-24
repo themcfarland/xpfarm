@@ -2,6 +2,9 @@ package database
 
 import (
 	"log"
+	"time"
+
+	"xpfarm/internal/crypto"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
@@ -11,6 +14,11 @@ import (
 var DB *gorm.DB
 
 func InitDB(debug bool) {
+	// Init encryption key before anything touches the DB
+	if err := crypto.Init(); err != nil {
+		log.Printf("Warning: failed to init crypto: %v — secrets will be stored unencrypted", err)
+	}
+
 	var err error
 	dbPath := "data/xpfarm.db"
 
@@ -41,12 +49,14 @@ func InitDB(debug bool) {
 		if _, err := sqlDB.Exec("PRAGMA busy_timeout=30000"); err != nil { // Increase to 30 seconds
 			log.Printf("Warning: failed to set busy_timeout: %v", err)
 		}
+		if _, err := sqlDB.Exec("PRAGMA journal_size_limit=67108864"); err != nil { // Cap WAL at 64MB
+			log.Printf("Warning: failed to set journal_size_limit: %v", err)
+		}
 
-		// Prevent "database is locked" during heavy concurrent scanning
-		// Serialize all write operations to SQLite by limiting to a single connection.
-		// WAL mode allows concurrent reads while one connection is writing.
-		sqlDB.SetMaxOpenConns(1)
-		sqlDB.SetMaxIdleConns(1)
+		// WAL mode serializes writes internally; allow multiple readers in parallel.
+		sqlDB.SetMaxOpenConns(10)
+		sqlDB.SetMaxIdleConns(5)
+		sqlDB.SetConnMaxLifetime(time.Hour)
 	}
 
 	// Migrate the schema

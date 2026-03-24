@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"xpfarm/internal/core"
+	"xpfarm/internal/crypto"
 	"xpfarm/internal/database"
 	"xpfarm/internal/modules"
 	"xpfarm/internal/notifications/discord"
@@ -30,6 +31,39 @@ import (
 //go:embed templates/* static/*
 var f embed.FS
 
+// csrfGuard rejects state-mutating POST requests that originate from external origins.
+// XPFarm is a local tool, so only localhost origins are legitimate callers.
+func csrfGuard() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.Method != http.MethodPost {
+			c.Next()
+			return
+		}
+		origin := c.Request.Header.Get("Origin")
+		referer := c.Request.Header.Get("Referer")
+
+		// Allow requests with no Origin/Referer (direct curl calls, same-origin form submits)
+		if origin == "" && referer == "" {
+			c.Next()
+			return
+		}
+
+		allowed := func(u string) bool {
+			return strings.HasPrefix(u, "http://localhost") ||
+				strings.HasPrefix(u, "http://127.0.0.1") ||
+				strings.HasPrefix(u, "http://0.0.0.0") ||
+				strings.HasPrefix(u, "https://localhost") ||
+				strings.HasPrefix(u, "https://127.0.0.1")
+		}
+
+		if (origin != "" && !allowed(origin)) || (referer != "" && !allowed(referer)) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "cross-origin request rejected"})
+			return
+		}
+		c.Next()
+	}
+}
+
 func StartServer(port string) error {
 	// Debug mode is already set in main.go via flag.Parse() and gin.SetMode().
 	// Check if Gin is in debug mode to enable the logger middleware.
@@ -38,6 +72,7 @@ func StartServer(port string) error {
 	// Use gin.New() to skip Default Logger output
 	r := gin.New()
 	r.Use(gin.Recovery())
+	r.Use(csrfGuard())
 	if isDebug {
 		r.Use(gin.Logger())
 	}
@@ -106,19 +141,27 @@ func StartServer(port string) error {
 	db := database.GetDB()
 	var settings []database.Setting
 	db.Find(&settings)
+	startupAuthKeys := make(map[string]string)
 	for _, s := range settings {
-		if s.Key == "DISCORD_TOKEN" {
-			discordToken = s.Value
+		val := crypto.Decrypt(s.Value)
+		switch s.Key {
+		case "DISCORD_TOKEN":
+			discordToken = val
+		case "DISCORD_CHANNEL_ID":
+			discordChannel = val
+		case "TELEGRAM_TOKEN":
+			telegramToken = val
+		case "TELEGRAM_CHAT_ID":
+			telegramChatID = val
+		default:
+			// Restore env vars for all other settings (e.g. AI provider keys)
+			os.Setenv(s.Key, val)
+			startupAuthKeys[s.Key] = val
 		}
-		if s.Key == "DISCORD_CHANNEL_ID" {
-			discordChannel = s.Value
-		}
-		if s.Key == "TELEGRAM_TOKEN" {
-			telegramToken = s.Value
-		}
-		if s.Key == "TELEGRAM_CHAT_ID" {
-			telegramChatID = s.Value
-		}
+	}
+	// Re-write auth file so Overlord has up-to-date credentials after restart
+	if len(startupAuthKeys) > 0 {
+		overlord.WriteAuthFile(startupAuthKeys)
 	}
 
 	// Notification Clients
@@ -224,17 +267,27 @@ func StartServer(port string) error {
 		var toolStats []ToolStat
 		db.Model(&database.ScanResult{}).Select("tool_name, count(*) as count").Group("tool_name").Scan(&toolStats)
 
-		// Chart Data: Targets per Asset
+		// Chart Data: Targets per Asset (GROUP BY avoids loading all target records)
 		type AssetStat struct {
 			ID    uint
 			Name  string
 			Count int
 		}
+		type targetCount struct {
+			AssetID uint
+			Count   int
+		}
 		var assetStats []AssetStat
 		var allAssets []database.Asset
-		db.Preload("Targets").Find(&allAssets)
+		db.Find(&allAssets)
+		var tCounts []targetCount
+		db.Model(&database.Target{}).Select("asset_id, count(*) as count").Group("asset_id").Scan(&tCounts)
+		tCountMap := make(map[uint]int, len(tCounts))
+		for _, tc := range tCounts {
+			tCountMap[tc.AssetID] = tc.Count
+		}
 		for _, a := range allAssets {
-			assetStats = append(assetStats, AssetStat{ID: a.ID, Name: a.Name, Count: len(a.Targets)})
+			assetStats = append(assetStats, AssetStat{ID: a.ID, Name: a.Name, Count: tCountMap[a.ID]})
 		}
 
 		// Chart: Tech Stack Distribution (Top 10)
@@ -500,9 +553,16 @@ func StartServer(port string) error {
 	})
 
 	r.POST("/api/overlord/binaries/upload", func(c *gin.Context) {
+		// Enforce 500 MB upload limit
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 500<<20)
+
 		file, err := c.FormFile("file")
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "No file provided"})
+			if err.Error() == "http: request body too large" {
+				c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "file exceeds 500 MB limit"})
+			} else {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "No file provided"})
+			}
 			return
 		}
 		f, err := file.Open()
@@ -511,7 +571,23 @@ func StartServer(port string) error {
 			return
 		}
 		defer f.Close()
-		if err := overlord.SaveBinary(file.Filename, f); err != nil {
+
+		// Detect MIME type from first 512 bytes
+		buf := make([]byte, 512)
+		n, _ := f.Read(buf)
+		mimeType := http.DetectContentType(buf[:n])
+		// Accept known binary/archive types; reject plain text disguised as binary
+		allowed := strings.HasPrefix(mimeType, "application/") ||
+			strings.HasPrefix(mimeType, "text/") || // scripts
+			mimeType == "application/octet-stream"
+		if !allowed {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "unsupported file type: " + mimeType})
+			return
+		}
+
+		// Rewind to include the already-read bytes by creating a combined reader
+		combined := io.MultiReader(strings.NewReader(string(buf[:n])), f)
+		if err := overlord.SaveBinary(file.Filename, combined); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -547,7 +623,7 @@ func StartServer(port string) error {
 		}
 		var s database.Setting
 		s.Key = "OVERLORD_MODEL"
-		s.Value = body.Model
+		s.Value = crypto.Encrypt(body.Model)
 		s.Description = "Selected AI model for Overlord"
 		database.GetDB().Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "key"}},
@@ -578,10 +654,10 @@ func StartServer(port string) error {
 			if k.EnvKey == "" || k.Value == "" {
 				continue
 			}
-			// Save to DB
+			// Save to DB (encrypted)
 			var s database.Setting
 			s.Key = k.EnvKey
-			s.Value = k.Value
+			s.Value = crypto.Encrypt(k.Value)
 			s.Description = k.ProviderID + " API Key"
 			db.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "key"}},
@@ -598,7 +674,7 @@ func StartServer(port string) error {
 		if body.EnabledProviders != nil {
 			var s database.Setting
 			s.Key = "OVERLORD_ENABLED_PROVIDERS"
-			s.Value = strings.Join(body.EnabledProviders, ",")
+			s.Value = crypto.Encrypt(strings.Join(body.EnabledProviders, ","))
 			s.Description = "Enabled AI providers"
 			db.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "key"}},
@@ -606,13 +682,13 @@ func StartServer(port string) error {
 			}).Create(&s)
 		}
 
-		// Write auth file
+		// Write auth file (plaintext — overlord reads this directly)
 		if len(authKeys) > 0 {
 			var allSettings []database.Setting
 			db.Find(&allSettings)
 			allKeys := make(map[string]string)
 			for _, s := range allSettings {
-				allKeys[s.Key] = s.Value
+				allKeys[s.Key] = crypto.Decrypt(s.Value)
 			}
 			overlord.WriteAuthFile(allKeys)
 		}
@@ -646,7 +722,7 @@ func StartServer(port string) error {
 				if val != "" {
 					var s database.Setting
 					s.Key = envKey
-					s.Value = val
+					s.Value = crypto.Encrypt(val)
 					s.Description = provider.Name + " API Key"
 					db.Clauses(clause.OnConflict{
 						Columns:   []clause.Column{{Name: "key"}},
@@ -661,13 +737,13 @@ func StartServer(port string) error {
 			}
 		}
 
-		// Write auth file for overlord container (fallback)
+		// Write auth file for overlord container (plaintext — overlord reads this directly)
 		if len(authKeys) > 0 {
 			var allSettings []database.Setting
 			db.Find(&allSettings)
 			allKeys := make(map[string]string)
 			for _, s := range allSettings {
-				allKeys[s.Key] = s.Value
+				allKeys[s.Key] = crypto.Decrypt(s.Value)
 			}
 			overlord.WriteAuthFile(allKeys)
 		}
@@ -697,13 +773,13 @@ func StartServer(port string) error {
 			return
 		}
 
-		results, err := core.GlobalSearch(req)
+		result, err := core.GlobalSearch(req)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 
-		c.JSON(http.StatusOK, results)
+		c.JSON(http.StatusOK, result)
 	})
 
 	r.POST("/api/search/save", func(c *gin.Context) {
@@ -826,6 +902,14 @@ func StartServer(port string) error {
 
 		targets := []string{}
 
+		// Report Structs (declared early so file parsing can append errors)
+		type ImportStatus struct {
+			Target string
+			Status string
+			Detail string
+		}
+		var report []ImportStatus
+
 		// 1. Process Raw Text (Newline separated)
 		if rawText != "" {
 			lines := strings.Split(rawText, "\n")
@@ -849,28 +933,37 @@ func StartServer(port string) error {
 
 				if strings.HasSuffix(filename, ".csv") {
 					r := csv.NewReader(strings.NewReader(strContent))
-					records, _ := r.ReadAll()
-					targetCol := -1
-					if len(records) > 0 {
-						header := records[0]
-						for i, h := range header {
-							h = strings.ToLower(strings.TrimSpace(h))
-							if h == "target" || h == "targets" {
-								targetCol = i
-								break
-							}
-						}
-					}
-					if targetCol != -1 && len(records) > 1 {
-						for _, row := range records[1:] {
-							if len(row) > targetCol {
-								targets = append(targets, strings.TrimSpace(row[targetCol]))
+					records, csvErr := r.ReadAll()
+					if csvErr != nil {
+						// Malformed CSV — surface error and fall back to line-by-line
+						report = append(report, ImportStatus{Target: "(csv parse error)", Status: "error", Detail: csvErr.Error()})
+						for _, line := range strings.Split(strContent, "\n") {
+							if t := strings.TrimSpace(line); t != "" {
+								targets = append(targets, t)
 							}
 						}
 					} else {
-						lines := strings.Split(strContent, "\n")
-						for _, line := range lines {
-							targets = append(targets, strings.TrimSpace(line))
+						targetCol := -1
+						if len(records) > 0 {
+							header := records[0]
+							for i, h := range header {
+								h = strings.ToLower(strings.TrimSpace(h))
+								if h == "target" || h == "targets" {
+									targetCol = i
+									break
+								}
+							}
+						}
+						if targetCol != -1 && len(records) > 1 {
+							for _, row := range records[1:] {
+								if len(row) > targetCol {
+									targets = append(targets, strings.TrimSpace(row[targetCol]))
+								}
+							}
+						} else {
+							for _, line := range strings.Split(strContent, "\n") {
+								targets = append(targets, strings.TrimSpace(line))
+							}
 						}
 					}
 				} else {
@@ -888,14 +981,6 @@ func StartServer(port string) error {
 			c.Redirect(http.StatusFound, "/assets")
 			return
 		}
-
-		// Report Structs
-		type ImportStatus struct {
-			Target string
-			Status string
-			Detail string
-		}
-		var report []ImportStatus
 
 		for _, tVal := range targets {
 			if tVal == "" {
@@ -1235,15 +1320,17 @@ func StartServer(port string) error {
 	})
 	// Settings
 	r.GET("/settings", func(c *gin.Context) {
-		var settings []database.Setting
-		database.GetDB().Find(&settings)
+		var rawSettings []database.Setting
+		database.GetDB().Find(&rawSettings)
 
-		// Get active provider for AI tab
+		// Decrypt values before passing to template
+		settings := make([]database.Setting, len(rawSettings))
 		activeProvider := ""
-		for _, s := range settings {
+		for i, s := range rawSettings {
+			settings[i] = s
+			settings[i].Value = crypto.Decrypt(s.Value)
 			if s.Key == "OVERLORD_ACTIVE_PROVIDER" {
-				activeProvider = s.Value
-				break
+				activeProvider = settings[i].Value
 			}
 		}
 
@@ -1265,7 +1352,7 @@ func StartServer(port string) error {
 			db := database.GetDB()
 			// Robust Upsert using OnConflict to handle soft-deletes and updates atomically
 			setting.Key = key
-			setting.Value = value
+			setting.Value = crypto.Encrypt(value)
 			setting.Description = desc
 			db.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "key"}},
@@ -1293,7 +1380,7 @@ func StartServer(port string) error {
 		for k, v := range settings {
 			var s database.Setting
 			s.Key = k
-			s.Value = v
+			s.Value = crypto.Encrypt(v)
 			s.Description = "Discord Configuration"
 			db.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "key"}},
@@ -1353,7 +1440,7 @@ func StartServer(port string) error {
 		for k, v := range settings {
 			var s database.Setting
 			s.Key = k
-			s.Value = v
+			s.Value = crypto.Encrypt(v)
 			s.Description = "Telegram Configuration"
 			db.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "key"}},
@@ -1534,6 +1621,44 @@ func StartServer(port string) error {
 		manager := core.GetManager()
 		active := manager.GetActiveScans()
 		c.JSON(http.StatusOK, gin.H{"active_scans": active})
+	})
+
+	// SSE endpoint: real-time scan stage progress for the dashboard
+	r.GET("/api/scan/events", func(c *gin.Context) {
+		c.Header("Content-Type", "text/event-stream")
+		c.Header("Cache-Control", "no-cache")
+		c.Header("Connection", "keep-alive")
+		c.Header("X-Accel-Buffering", "no")
+
+		mgr := core.GetManager()
+		ch := mgr.Subscribe()
+		defer mgr.Unsubscribe(ch)
+
+		// Flush headers immediately
+		c.Writer.WriteHeader(http.StatusOK)
+		if f, ok := c.Writer.(http.Flusher); ok {
+			f.Flush()
+		}
+
+		ctx := c.Request.Context()
+		for {
+			select {
+			case evt, ok := <-ch:
+				if !ok {
+					return
+				}
+				data, err := json.Marshal(evt)
+				if err != nil {
+					continue
+				}
+				fmt.Fprintf(c.Writer, "data: %s\n\n", data)
+				if f, ok := c.Writer.(http.Flusher); ok {
+					f.Flush()
+				}
+			case <-ctx.Done():
+				return
+			}
+		}
 	})
 
 	r.POST("/api/scan/stop", func(c *gin.Context) {
