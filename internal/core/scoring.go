@@ -23,9 +23,12 @@ var scoringWeights = struct {
 	VulnMedium   float64
 	VulnHigh     float64
 	VulnCritical float64
-	CVEBase      float64 // base points per CVE
-	CVEKev       float64 // bonus for CISA KEV entries
-	CVEPoc       float64 // bonus for CVEs with public PoC
+	CVEBase            float64 // base points per CVE
+	CVEKev             float64 // bonus for CISA KEV entries
+	CVEVulnCheckKev    float64 // bonus for VulnCheck KEV (broader coverage than CISA)
+	CVEPoc             float64 // bonus for CVEs with public PoC
+	CVEEpssHigh        float64 // bonus when EPSS > 0.5 (top 50th percentile)
+	CVEEpssVeryHigh    float64 // bonus when EPSS > 0.9 (top 10th percentile, actively weaponized)
 	// Recency: decay per day since last scan
 	RecencyDecayPerDay float64
 }{
@@ -41,9 +44,12 @@ var scoringWeights = struct {
 	VulnMedium:   5.0,
 	VulnHigh:     8.0,
 	VulnCritical: 15.0,
-	CVEBase:      1.0,
-	CVEKev:       10.0,
-	CVEPoc:       5.0,
+	CVEBase:          1.0,
+	CVEKev:           10.0,
+	CVEVulnCheckKev:  8.0,
+	CVEPoc:           5.0,
+	CVEEpssHigh:      6.0,
+	CVEEpssVeryHigh:  12.0,
 	// Recency decay
 	RecencyDecayPerDay: 0.1,
 }
@@ -140,8 +146,17 @@ func ComputeFullScore(db *gorm.DB, target *database.Target) TargetSurfaceScore {
 		if c.IsKEV {
 			s.CVEScore += scoringWeights.CVEKev
 		}
+		if c.InVulnCheckKEV {
+			s.CVEScore += scoringWeights.CVEVulnCheckKev
+		}
 		if c.HasPOC {
 			s.CVEScore += scoringWeights.CVEPoc
+		}
+		// EPSS-based exploit probability bonus
+		if c.EpssScore > 0.9 {
+			s.CVEScore += scoringWeights.CVEEpssVeryHigh
+		} else if c.EpssScore > 0.5 {
+			s.CVEScore += scoringWeights.CVEEpssHigh
 		}
 	}
 

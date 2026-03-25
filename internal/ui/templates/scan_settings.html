@@ -283,6 +283,45 @@
                 </div>
                 <p style="color: var(--color-muted); font-size: 0.8rem; margin: 0;">Note: Advanced custom Nuclei
                     template selection is configured under the 'Advanced Templates' section of the Asset page.</p>
+
+                <div style="border-top: 1px solid var(--color-border); margin: 18px 0 14px 0;"></div>
+                <p style="color: var(--color-primary); font-size: 0.85rem; font-weight: 600; margin: 0 0 12px 0;">AI Intelligence Enrichment</p>
+
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                    <div>
+                        <span style="font-size: 0.95rem;">EPSS Exploit Probability (FIRST.org)</span>
+                        <p style="color: var(--color-muted); font-size: 0.78rem; margin: 2px 0 0 0;">Free. Fetches 30-day exploit probability for all found CVEs.</p>
+                    </div>
+                    <label class="switch"><input type="checkbox" name="enable_epss_enrich" {{if
+                            .Asset.ScanProfile.EnableEPSSEnrich}}checked{{end}}><span class="slider"></span></label>
+                </div>
+
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                    <div>
+                        <span style="font-size: 0.95rem;">VulnCheck KEV (142% more than CISA)</span>
+                        <p style="color: var(--color-muted); font-size: 0.78rem; margin: 2px 0 0 0;">Requires VULNCHECK_API_KEY in Settings. Community tier is free.</p>
+                    </div>
+                    <label class="switch"><input type="checkbox" name="enable_vulncheck_kev" {{if
+                            .Asset.ScanProfile.EnableVulnCheckKEV}}checked{{end}}><span class="slider"></span></label>
+                </div>
+
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                    <div>
+                        <span style="font-size: 0.95rem;">GreyNoise IP Noise Filtering</span>
+                        <p style="color: var(--color-muted); font-size: 0.78rem; margin: 2px 0 0 0;">Requires GREYNOISE_API_KEY. Skips RIOT/honeypot IPs before scanning.</p>
+                    </div>
+                    <label class="switch"><input type="checkbox" name="enable_greynoise" {{if
+                            .Asset.ScanProfile.EnableGreyNoise}}checked{{end}}><span class="slider"></span></label>
+                </div>
+
+                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;">
+                    <div>
+                        <span style="font-size: 0.95rem;">Screenshot Vision Analysis (AI)</span>
+                        <p style="color: var(--color-muted); font-size: 0.78rem; margin: 2px 0 0 0;">Requires OPENAI_API_KEY or ANTHROPIC_API_KEY. ~$0.002/screenshot.</p>
+                    </div>
+                    <label class="switch"><input type="checkbox" name="enable_vision_analysis" {{if
+                            .Asset.ScanProfile.EnableVisionAnalysis}}checked{{end}}><span class="slider"></span></label>
+                </div>
             </div>
         </div>
     </div>

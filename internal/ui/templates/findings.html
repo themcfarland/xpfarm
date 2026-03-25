@@ -130,7 +130,12 @@ function renderFindings(findings) {
             <td style="font-size:0.78rem;color:var(--color-muted);">${f.cve_id ? 'CVE' : 'Vulnerability'}</td>
             <td style="font-weight:600;color:var(--color-primary);">${f.affected_count}</td>
             <td style="font-size:0.82rem;">${f.max_cvss > 0 ? f.max_cvss.toFixed(1) : '—'}</td>
-            <td>${f.is_kev ? '<span class="kev-badge">KEV</span>' : ''}</td>
+            <td>
+                ${f.is_kev ? '<span class="kev-badge">KEV</span>' : ''}
+                ${f.in_vulncheck_kev ? '<span class="kev-badge" style="background:#cc5500;" title="VulnCheck KEV">VC-KEV</span>' : ''}
+                ${f.epss_score > 0 ? `<span class="kev-badge" style="background:${f.epss_score > 0.9 ? '#cc0000' : f.epss_score > 0.5 ? '#cc6600' : '#555'};" title="EPSS: ${(f.epss_score*100).toFixed(1)}% exploit probability">EPSS ${(f.epss_score*100).toFixed(0)}%</span>` : ''}
+                ${f.risk_score > 0 ? `<span style="font-size:0.72rem;color:var(--color-muted);" title="Risk Score">⚡${f.risk_score.toFixed(2)}</span>` : ''}
+            </td>
         </tr>`;
     }).join('');
 }

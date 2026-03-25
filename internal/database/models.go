@@ -73,8 +73,9 @@ type WebAsset struct {
 	CNAME        string         `json:"cname"`
 	CDN          string         `json:"cdn"`
 	Response     string         `json:"response"` // Raw response body/headers if needed
-	Screenshot   string         `json:"screenshot_path"`
-	KatanaOutput string         `json:"katana_output"`
+	Screenshot      string         `json:"screenshot_path"`
+	VisionAnalysis  string         `json:"vision_analysis" gorm:"default:''"`
+	KatanaOutput    string         `json:"katana_output"`
 	CreatedAt    time.Time      `json:"created_at"`
 	UpdatedAt    time.Time      `json:"updated_at"`
 	DeletedAt    gorm.DeletedAt `gorm:"index" json:"-"`
@@ -94,18 +95,21 @@ type Vulnerability struct {
 }
 
 type CVE struct {
-	ID          uint           `gorm:"primaryKey" json:"id"`
-	TargetID    uint           `gorm:"index;uniqueIndex:idx_cve_unique" json:"target_id"`
-	Product     string         `gorm:"index:idx_cve_product;uniqueIndex:idx_cve_unique" json:"product"`
-	CveID       string         `gorm:"index:idx_cve_id;uniqueIndex:idx_cve_unique" json:"cve_id"`
-	Severity    string         `gorm:"index:idx_cve_severity" json:"severity"`
-	CvssScore   float64        `json:"cvss_score"`
-	EpssScore   float64        `json:"epss_score"`
-	IsKEV       bool           `json:"is_kev"`
-	HasPOC      bool           `json:"has_poc"`
-	HasTemplate bool           `json:"has_template"`
-	CreatedAt   time.Time      `json:"created_at"`
-	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
+	ID             uint           `gorm:"primaryKey" json:"id"`
+	TargetID       uint           `gorm:"index;uniqueIndex:idx_cve_unique" json:"target_id"`
+	Product        string         `gorm:"index:idx_cve_product;uniqueIndex:idx_cve_unique" json:"product"`
+	CveID          string         `gorm:"index:idx_cve_id;uniqueIndex:idx_cve_unique" json:"cve_id"`
+	Severity       string         `gorm:"index:idx_cve_severity" json:"severity"`
+	CvssScore      float64        `json:"cvss_score"`
+	EpssScore      float64        `json:"epss_score"`
+	EpssPercentile float64        `json:"epss_percentile" gorm:"default:0"`
+	IsKEV          bool           `json:"is_kev"`
+	InVulnCheckKEV bool           `json:"in_vulncheck_kev" gorm:"default:false"`
+	RiskScore      float64        `json:"risk_score" gorm:"default:0"`
+	HasPOC         bool           `json:"has_poc"`
+	HasTemplate    bool           `json:"has_template"`
+	CreatedAt      time.Time      `json:"created_at"`
+	DeletedAt      gorm.DeletedAt `gorm:"index" json:"-"`
 }
 
 type ScanResult struct {
@@ -176,6 +180,13 @@ type ScanProfile struct {
 	EnableVulnScan bool `json:"enable_vuln_scan" gorm:"default:true"`
 	EnableCvemap   bool `json:"enable_cvemap" gorm:"default:true"`
 	EnableNuclei   bool `json:"enable_nuclei" gorm:"default:false"`
+
+	// Intelligence enrichment toggles
+	EnableGreyNoise      bool `json:"enable_greynoise" gorm:"default:false"`
+	EnableVisionAnalysis bool `json:"enable_vision_analysis" gorm:"default:false"`
+	EnableEPSSEnrich     bool `json:"enable_epss_enrich" gorm:"default:true"`
+	EnableVulnCheckKEV   bool `json:"enable_vulncheck_kev" gorm:"default:false"`
+	EnableAutoReport     bool `json:"enable_auto_report" gorm:"default:false"`
 
 	CreatedAt time.Time      `json:"created_at"`
 	UpdatedAt time.Time      `json:"updated_at"`

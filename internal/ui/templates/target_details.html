@@ -171,6 +171,9 @@
                         <img src="/{{.Screenshot}}" alt="Screenshot"
                             style="width: 50px; height: 35px; object-fit: cover; cursor: pointer; border: 1px solid var(--border-color); border-radius: 4px;"
                             onclick="showImage('/{{.Screenshot}}')">
+                        {{if .VisionAnalysis}}
+                        <div style="font-size:0.7rem; color:var(--color-muted); margin-top:3px; max-width:160px; white-space:normal;" title="AI Vision Analysis">🤖 {{.VisionAnalysis | truncateString 80}}</div>
+                        {{end}}
                         {{else}}
                         -
                         {{end}}

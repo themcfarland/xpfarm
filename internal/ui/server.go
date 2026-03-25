@@ -262,6 +262,12 @@ func StartServer(port string) error {
 				a, _ := json.Marshal(v)
 				return template.JS(a)
 			},
+			"truncateString": func(s string, n int) string {
+				if len(s) <= n {
+					return s
+				}
+				return s[:n] + "…"
+			},
 		})
 
 		// Parse layout
@@ -1456,6 +1462,13 @@ func StartServer(port string) error {
 		profile.EnableVulnScan = c.PostForm("enable_vuln_scan") == "on"
 		profile.EnableCvemap = c.PostForm("enable_cvemap") == "on"
 		profile.EnableNuclei = c.PostForm("enable_nuclei") == "on"
+
+		// Intelligence enrichment toggles
+		profile.EnableEPSSEnrich = c.PostForm("enable_epss_enrich") == "on"
+		profile.EnableVulnCheckKEV = c.PostForm("enable_vulncheck_kev") == "on"
+		profile.EnableGreyNoise = c.PostForm("enable_greynoise") == "on"
+		profile.EnableVisionAnalysis = c.PostForm("enable_vision_analysis") == "on"
+		profile.EnableAutoReport = c.PostForm("enable_auto_report") == "on"
 
 		db.Save(profile)
 		c.Redirect(http.StatusFound, "/asset/"+id+"/settings")
@@ -3105,13 +3118,17 @@ func StartServer(port string) error {
 	r.GET("/api/findings/deduplicated", func(c *gin.Context) {
 		db := database.GetDB()
 		type Row struct {
-			Name          string  `json:"name"`
-			Severity      string  `json:"severity"`
-			TemplateID    string  `json:"template_id"`
-			CveID         string  `json:"cve_id"`
-			AffectedCount int     `json:"affected_count"`
-			MaxCVSS       float64 `json:"max_cvss"`
-			IsKEV         bool    `json:"is_kev"`
+			Name           string  `json:"name"`
+			Severity       string  `json:"severity"`
+			TemplateID     string  `json:"template_id"`
+			CveID          string  `json:"cve_id"`
+			AffectedCount  int     `json:"affected_count"`
+			MaxCVSS        float64 `json:"max_cvss"`
+			IsKEV          bool    `json:"is_kev"`
+			InVulnCheckKEV bool    `json:"in_vulncheck_kev"`
+			EpssScore      float64 `json:"epss_score"`
+			EpssPercentile float64 `json:"epss_percentile"`
+			RiskScore      float64 `json:"risk_score"`
 		}
 
 		severity := c.Query("severity")
@@ -3136,7 +3153,7 @@ func StartServer(port string) error {
 
 		// CVEs
 		var cves []database.CVE
-		cq := db.Select("cve_id, severity, cvss_score, is_kev, product")
+		cq := db.Select("cve_id, severity, cvss_score, is_kev, in_vulncheck_kev, epss_score, epss_percentile, risk_score, product")
 		if severity != "" {
 			cq = cq.Where("LOWER(severity) = ?", strings.ToLower(severity))
 		}
@@ -3144,7 +3161,7 @@ func StartServer(port string) error {
 		for _, c := range cves {
 			k := key{c.CveID, ""}
 			if _, ok := agg[k]; !ok {
-				agg[k] = &Row{Name: c.CveID, Severity: c.Severity, CveID: c.CveID, IsKEV: c.IsKEV}
+				agg[k] = &Row{Name: c.CveID, Severity: c.Severity, CveID: c.CveID, IsKEV: c.IsKEV, InVulnCheckKEV: c.InVulnCheckKEV, EpssScore: c.EpssScore, EpssPercentile: c.EpssPercentile, RiskScore: c.RiskScore}
 			}
 			agg[k].AffectedCount++
 			if c.CvssScore > agg[k].MaxCVSS {
@@ -3153,6 +3170,16 @@ func StartServer(port string) error {
 			if c.IsKEV {
 				agg[k].IsKEV = true
 			}
+			if c.InVulnCheckKEV {
+				agg[k].InVulnCheckKEV = true
+			}
+			if c.EpssScore > agg[k].EpssScore {
+				agg[k].EpssScore = c.EpssScore
+				agg[k].EpssPercentile = c.EpssPercentile
+			}
+			if c.RiskScore > agg[k].RiskScore {
+				agg[k].RiskScore = c.RiskScore
+			}
 		}
 
 		rows := make([]Row, 0, len(agg))
@@ -3160,6 +3187,17 @@ func StartServer(port string) error {
 			rows = append(rows, *v)
 		}
 		sort.Slice(rows, func(i, j int) bool {
+			// Primary sort: KEV status (confirmed exploited first)
+			iKev := rows[i].IsKEV || rows[i].InVulnCheckKEV
+			jKev := rows[j].IsKEV || rows[j].InVulnCheckKEV
+			if iKev != jKev {
+				return iKev
+			}
+			// Secondary sort: risk score when available
+			if rows[i].RiskScore != rows[j].RiskScore {
+				return rows[i].RiskScore > rows[j].RiskScore
+			}
+			// Tertiary: severity
 			order := map[string]int{"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 			a := order[strings.ToLower(rows[i].Severity)]
 			b := order[strings.ToLower(rows[j].Severity)]

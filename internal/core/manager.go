@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"xpfarm/internal/core/enrichment"
 	"xpfarm/internal/database"
 	"xpfarm/internal/modules"
 	"xpfarm/pkg/utils"
@@ -529,6 +530,26 @@ func (sm *ScanManager) runScanLogic(ctx context.Context, targetInput string, ass
 		close(targetsChan)
 	}()
 
+	// === STAGE 2.5: GreyNoise IP Noise Filtering ===
+	// If enabled, drain targetsChan, check each IP, and re-publish filtered targets.
+	// RIOT IPs (legit internet services) are dropped to avoid wasting scan time.
+	if profile.EnableGreyNoise {
+		filtered := make(chan database.Target, 100)
+		go func() {
+			for t := range targetsChan {
+				gn := enrichment.CheckGreyNoise(t.Value)
+				if gn != nil && gn.ShouldSkip() {
+					utils.LogInfo("[GreyNoise] Skipping %s — RIOT address (%s)", t.Value, gn.Name)
+					Audit("target_skip", t.Value, assetName, "", 0, "", "greynoise-riot")
+					continue
+				}
+				filtered <- t
+			}
+			close(filtered)
+		}()
+		targetsChan = filtered
+	}
+
 	// === CONSUMER (Worker Pool — Naabu + downstream stages) ===
 	maxWorkers := adaptiveWorkerCount()
 	naabuMod := modules.Get("naabu")
@@ -902,6 +923,11 @@ func (sm *ScanManager) runScanLogic(ctx context.Context, targetInput string, ass
 													}(w)
 												}
 												webWG.Wait()
+
+												// === STAGE 6.5: Vision Analysis of Screenshots ===
+												if profile.EnableVisionAnalysis {
+													enrichment.AnalyzeScreenshots(db, t.ID)
+												}
 											}
 										}
 									}
@@ -918,6 +944,14 @@ func (sm *ScanManager) runScanLogic(ctx context.Context, targetInput string, ass
 							t0cve := time.Now()
 							sm.runCvemapScan(ctx, db, t)
 							Audit("stage_done", t.Value, assetName, "cve-lookup", time.Since(t0cve).Milliseconds(), "", "")
+						}
+
+						// === STAGE 7.5: CVE Intelligence Enrichment (EPSS + VulnCheck KEV) ===
+						if profile.EnableEPSSEnrich {
+							enrichment.EnrichCVEsWithEPSS(db, t.ID)
+						}
+						if profile.EnableVulnCheckKEV {
+							enrichment.EnrichCVEsWithVulnCheckKEV(db, t.ID)
 						}
 
 						sm.broadcastProgress(t.Value, assetName, "stage", "vuln-scan", 8)
