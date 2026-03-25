@@ -1,0 +1,195 @@
+{{define "title"}}Scan History — XPFarm{{end}}
+{{define "content"}}
+<style>
+.history-grid { display: grid; grid-template-columns: 300px 1fr; gap: 20px; }
+.panel { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; overflow: hidden; }
+.panel-header { padding: 14px 18px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; justify-content: space-between; }
+.panel-header h3 { margin: 0; font-size: 0.95rem; font-weight: 600; }
+.snap-row { padding: 10px 14px; border-bottom: 1px solid var(--border-color); cursor: pointer; transition: background .1s; }
+.snap-row:hover, .snap-row.selected { background: var(--bg-hover); }
+.snap-row .snap-date { font-size: 0.85rem; font-weight: 500; }
+.snap-row .snap-meta { font-size: 0.75rem; color: var(--color-muted); margin-top: 2px; }
+.diff-new   { background: rgba(16,185,129,0.08); border-left: 3px solid #10b981; }
+.diff-fixed { background: rgba(239,68,68,0.08); border-left: 3px solid #ef4444; }
+.diff-item  { padding: 8px 12px; border-radius: 6px; margin-bottom: 6px; font-size: 0.83rem; }
+.sev-badge  { padding: 1px 7px; border-radius: 4px; font-size: 0.7rem; font-weight: 600; }
+.sev-critical { background:#7f1d1d;color:#fecaca; }
+.sev-high     { background:#7c2d12;color:#fed7aa; }
+.sev-medium   { background:#78350f;color:#fde68a; }
+.sev-low      { background:#14532d;color:#bbf7d0; }
+.sev-info     { background:#1e3a5f;color:#bfdbfe; }
+</style>
+
+<div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">
+    <div>
+        <h2 class="page-title" style="margin:0;">Scan History</h2>
+        <p class="page-subtitle" style="margin:4px 0 0;">Compare scan snapshots to track what's new or fixed</p>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;">
+        <select id="asset-sel" onchange="loadHistory()" style="padding:7px 12px;background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:6px;color:var(--color-text);">
+            <option value="">Select asset…</option>
+        </select>
+        <button class="btn btn-primary" onclick="captureNow()" style="padding:7px 14px;">+ Capture Snapshot</button>
+    </div>
+</div>
+
+<div class="history-grid">
+    <!-- Snapshot list -->
+    <div class="panel" style="align-self:start;max-height:calc(100vh - 200px);overflow-y:auto;">
+        <div class="panel-header"><h3>Snapshots</h3></div>
+        <div id="snap-list"><p style="padding:16px;color:var(--color-muted);font-style:italic;">Select an asset above.</p></div>
+    </div>
+
+    <!-- Diff / Details panel -->
+    <div class="panel">
+        <div class="panel-header">
+            <h3 id="diff-title">Select two snapshots to compare</h3>
+            <div id="diff-actions" style="display:none;gap:8px;">
+                <button class="btn btn-primary" style="padding:4px 12px;font-size:0.8rem;" onclick="runDiff()">Compare Selected</button>
+                <button class="btn btn-secondary" style="padding:4px 12px;font-size:0.8rem;" onclick="clearSelection()">Clear</button>
+            </div>
+        </div>
+        <div id="diff-body" style="padding:18px;overflow-y:auto;max-height:calc(100vh - 260px);">
+            <p style="color:var(--color-muted);font-style:italic;">Select two snapshots from the list to see what changed, or one to view its findings.</p>
+        </div>
+    </div>
+</div>
+
+<script>
+let snapshots = [];
+let selectedSnaps = [];
+
+async function loadAssets() {
+    const r = await fetch('/api/assets');
+    const d = await r.json();
+    const sel = document.getElementById('asset-sel');
+    (d.assets||[]).forEach(a => {
+        const opt = document.createElement('option');
+        opt.value = a.id; opt.textContent = a.name;
+        sel.appendChild(opt);
+    });
+}
+
+async function loadHistory() {
+    const assetID = document.getElementById('asset-sel').value;
+    if (!assetID) return;
+    const r = await fetch('/api/history/' + assetID);
+    const d = await r.json();
+    snapshots = d.snapshots || [];
+    selectedSnaps = [];
+    renderSnapList();
+    document.getElementById('diff-title').textContent = 'Select two snapshots to compare';
+    document.getElementById('diff-body').innerHTML = '<p style="color:var(--color-muted);font-style:italic;">Select two snapshots from the list to see what changed, or one to view its findings.</p>';
+    document.getElementById('diff-actions').style.display = 'none';
+}
+
+function renderSnapList() {
+    const list = document.getElementById('snap-list');
+    if (!snapshots.length) {
+        list.innerHTML = '<p style="padding:16px;color:var(--color-muted);font-style:italic;">No snapshots yet. Click "Capture Snapshot" to create one.</p>';
+        return;
+    }
+    list.innerHTML = snapshots.map((s, i) => `
+        <div class="snap-row ${selectedSnaps.includes(s.id) ? 'selected' : ''}" onclick="toggleSnap(${s.id})" id="snap-${s.id}">
+            <div class="snap-date">${new Date(s.scanned_at).toLocaleString()}</div>
+            <div class="snap-meta">
+                ${s.target_count} targets &nbsp;·&nbsp;
+                ${s.port_count} ports &nbsp;·&nbsp;
+                <span style="color:#ef4444;">${s.vuln_count} findings</span>
+                ${i === 0 ? ' &nbsp;<span style="color:#10b981;font-size:0.7rem;">LATEST</span>' : ''}
+            </div>
+        </div>`).join('');
+}
+
+function toggleSnap(id) {
+    const idx = selectedSnaps.indexOf(id);
+    if (idx >= 0) {
+        selectedSnaps.splice(idx, 1);
+    } else {
+        if (selectedSnaps.length >= 2) selectedSnaps.shift();
+        selectedSnaps.push(id);
+    }
+    renderSnapList();
+    const actions = document.getElementById('diff-actions');
+    actions.style.display = selectedSnaps.length === 2 ? 'flex' : 'none';
+    if (selectedSnaps.length === 1) viewSnapshot(selectedSnaps[0]);
+}
+
+async function viewSnapshot(id) {
+    const r = await fetch('/api/history/snapshot/' + id);
+    const d = await r.json();
+    const findings = d.findings || [];
+    document.getElementById('diff-title').textContent = 'Snapshot — ' + new Date(d.snapshot.scanned_at).toLocaleString();
+    const body = document.getElementById('diff-body');
+    if (!findings.length) { body.innerHTML = '<p style="color:var(--color-muted);">No findings in this snapshot.</p>'; return; }
+    body.innerHTML = findings.map(f => `
+        <div style="padding:8px 12px;border-radius:6px;background:var(--bg-secondary);border:1px solid var(--border-color);margin-bottom:6px;font-size:0.83rem;display:flex;gap:8px;align-items:center;">
+            <span class="sev-badge sev-${(f.severity||'info').toLowerCase()}">${f.severity||'info'}</span>
+            <span style="flex:1;">${escHtml(f.name)}</span>
+            <span style="color:var(--color-muted);font-size:0.75rem;">${escHtml(f.target)}</span>
+        </div>`).join('');
+}
+
+async function runDiff() {
+    if (selectedSnaps.length < 2) return;
+    // Compare older → newer (snapshots are newest-first, so index 1 is older)
+    const [newer, older] = selectedSnaps;
+    const r = await fetch(`/api/history/diff/${older}/${newer}`);
+    const d = await r.json();
+
+    document.getElementById('diff-title').textContent = `Diff — ${d.new?.length||0} new · ${d.fixed?.length||0} fixed · ${d.unchanged||0} unchanged`;
+
+    let html = '';
+    if (d.new?.length) {
+        html += `<div style="font-weight:600;color:#10b981;margin-bottom:8px;">🆕 New Findings (${d.new.length})</div>`;
+        html += d.new.map(f => `
+            <div class="diff-item diff-new">
+                <span class="sev-badge sev-${(f.severity||'info').toLowerCase()}">${f.severity||'info'}</span>
+                <span style="margin-left:8px;">${escHtml(f.name)}</span>
+                <span style="color:var(--color-muted);font-size:0.75rem;float:right;">${escHtml(f.target)}</span>
+            </div>`).join('');
+    }
+    if (d.fixed?.length) {
+        html += `<div style="font-weight:600;color:#ef4444;margin:16px 0 8px;">✓ Fixed / Resolved (${d.fixed.length})</div>`;
+        html += d.fixed.map(f => `
+            <div class="diff-item diff-fixed">
+                <span class="sev-badge sev-${(f.severity||'info').toLowerCase()}">${f.severity||'info'}</span>
+                <span style="margin-left:8px;text-decoration:line-through;opacity:.7;">${escHtml(f.name)}</span>
+                <span style="color:var(--color-muted);font-size:0.75rem;float:right;">${escHtml(f.target)}</span>
+            </div>`).join('');
+    }
+    if (!d.new?.length && !d.fixed?.length) {
+        html = '<p style="color:var(--color-muted);">No changes between these two snapshots.</p>';
+    }
+    document.getElementById('diff-body').innerHTML = html;
+}
+
+async function captureNow() {
+    const assetID = document.getElementById('asset-sel').value;
+    if (!assetID) { alert('Select an asset first'); return; }
+    const r = await fetch('/api/history/snapshot', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({asset_id: parseInt(assetID)})
+    });
+    const d = await r.json();
+    if (r.ok) {
+        loadHistory();
+    } else {
+        alert(d.error || 'Failed to capture snapshot');
+    }
+}
+
+function clearSelection() {
+    selectedSnaps = [];
+    renderSnapList();
+    document.getElementById('diff-actions').style.display = 'none';
+    document.getElementById('diff-title').textContent = 'Select two snapshots to compare';
+    document.getElementById('diff-body').innerHTML = '<p style="color:var(--color-muted);font-style:italic;">Select two snapshots from the list to see what changed, or one to view its findings.</p>';
+}
+
+function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+loadAssets();
+</script>
+{{end}}

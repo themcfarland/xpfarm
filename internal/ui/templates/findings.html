@@ -1,0 +1,153 @@
+{{define "title"}}Findings — XPFarm{{end}}
+{{define "content"}}
+<style>
+.findings-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+.findings-toolbar input, .findings-toolbar select { padding: 7px 12px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 6px; color: var(--color-text); font-size: 0.85rem; }
+.findings-toolbar input { flex: 1; min-width: 180px; }
+.f-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.f-table th { text-align: left; padding: 8px 10px; color: var(--color-muted); font-weight: 500; border-bottom: 1px solid var(--border-color); position: sticky; top: 0; background: var(--bg-card); }
+.f-table td { padding: 7px 10px; border-bottom: 1px solid var(--border-color); }
+.f-table tr:hover td { background: var(--bg-hover); }
+.sev-badge { padding: 2px 8px; border-radius: 4px; font-size: 0.7rem; font-weight: 600; white-space: nowrap; }
+.sev-critical { background:#7f1d1d;color:#fecaca; }
+.sev-high     { background:#7c2d12;color:#fed7aa; }
+.sev-medium   { background:#78350f;color:#fde68a; }
+.sev-low      { background:#14532d;color:#bbf7d0; }
+.sev-info     { background:#1e3a5f;color:#bfdbfe; }
+.kev-badge    { padding: 2px 6px; border-radius: 4px; font-size: 0.68rem; background: rgba(239,68,68,0.2); color: #ef4444; font-weight: 600; }
+.export-bar   { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+</style>
+
+<div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px;">
+    <div>
+        <h2 class="page-title" style="margin:0;">Findings</h2>
+        <p class="page-subtitle" style="margin:4px 0 0;">Deduplicated findings across all assets — sorted by severity</p>
+    </div>
+    <span id="total-count" style="font-size:0.85rem;color:var(--color-muted);align-self:center;"></span>
+</div>
+
+<!-- Export bar -->
+<div class="export-bar">
+    <span style="font-size:0.82rem;color:var(--color-muted);">Export:</span>
+    <select id="export-asset" style="padding:5px 10px;background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:6px;color:var(--color-text);font-size:0.8rem;">
+        <option value="">All Assets</option>
+    </select>
+    <select id="export-sev" style="padding:5px 10px;background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:6px;color:var(--color-text);font-size:0.8rem;">
+        <option value="">All Severities</option>
+        <option value="critical">Critical</option>
+        <option value="high">High</option>
+        <option value="medium">Medium</option>
+        <option value="low">Low</option>
+    </select>
+    <a id="export-csv" href="#" onclick="doExport('csv')" class="btn btn-secondary" style="padding:5px 12px;font-size:0.8rem;">↓ CSV</a>
+    <a id="export-json" href="#" onclick="doExport('json')" class="btn btn-secondary" style="padding:5px 12px;font-size:0.8rem;">↓ JSON</a>
+</div>
+
+<div class="card" style="padding:16px;">
+    <div class="findings-toolbar">
+        <input type="text" id="search" placeholder="Search findings…" oninput="applyFilters()">
+        <select id="sev-filter" onchange="applyFilters()">
+            <option value="">All Severities</option>
+            <option value="critical">Critical</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+            <option value="info">Info</option>
+        </select>
+        <label style="display:flex;align-items:center;gap:6px;font-size:0.82rem;color:var(--color-muted);cursor:pointer;">
+            <input type="checkbox" id="kev-only" onchange="applyFilters()"> KEV only
+        </label>
+    </div>
+    <div style="overflow-x:auto;max-height:calc(100vh - 320px);overflow-y:auto;">
+        <table class="f-table">
+            <thead>
+                <tr>
+                    <th>Severity</th>
+                    <th>Finding</th>
+                    <th>Type</th>
+                    <th>Affected</th>
+                    <th>CVSS</th>
+                    <th>Flags</th>
+                </tr>
+            </thead>
+            <tbody id="findings-body">
+                <tr><td colspan="6" style="text-align:center;color:var(--color-muted);padding:20px;">Loading…</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+let allFindings = [];
+
+async function loadFindings() {
+    const r = await fetch('/api/findings/deduplicated');
+    const d = await r.json();
+    allFindings = d.findings || [];
+    document.getElementById('total-count').textContent = allFindings.length + ' unique findings';
+    applyFilters();
+}
+
+async function loadAssets() {
+    const r = await fetch('/api/assets');
+    const d = await r.json();
+    const sel = document.getElementById('export-asset');
+    (d.assets||[]).forEach(a => {
+        const opt = document.createElement('option');
+        opt.value = a.id; opt.textContent = a.name;
+        sel.appendChild(opt);
+    });
+}
+
+function applyFilters() {
+    const q = document.getElementById('search').value.toLowerCase();
+    const sev = document.getElementById('sev-filter').value.toLowerCase();
+    const kevOnly = document.getElementById('kev-only').checked;
+    const filtered = allFindings.filter(f => {
+        if (sev && f.severity?.toLowerCase() !== sev) return false;
+        if (kevOnly && !f.is_kev) return false;
+        if (q && !f.name?.toLowerCase().includes(q) && !f.template_id?.toLowerCase().includes(q) && !f.cve_id?.toLowerCase().includes(q)) return false;
+        return true;
+    });
+    renderFindings(filtered);
+}
+
+function renderFindings(findings) {
+    const tbody = document.getElementById('findings-body');
+    if (!findings.length) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--color-muted);padding:20px;">No findings match filters.</td></tr>';
+        return;
+    }
+    tbody.innerHTML = findings.map(f => {
+        const sev = (f.severity||'info').toLowerCase();
+        return `<tr>
+            <td><span class="sev-badge sev-${sev}">${sev}</span></td>
+            <td style="max-width:380px;">
+                <div style="font-weight:500;">${escHtml(f.name)}</div>
+                ${f.template_id ? '<div style="font-size:0.75rem;color:var(--color-muted);font-family:monospace;">'+escHtml(f.template_id)+'</div>' : ''}
+                ${f.cve_id ? '<div style="font-size:0.75rem;color:var(--color-primary);">'+escHtml(f.cve_id)+'</div>' : ''}
+            </td>
+            <td style="font-size:0.78rem;color:var(--color-muted);">${f.cve_id ? 'CVE' : 'Vulnerability'}</td>
+            <td style="font-weight:600;color:var(--color-primary);">${f.affected_count}</td>
+            <td style="font-size:0.82rem;">${f.max_cvss > 0 ? f.max_cvss.toFixed(1) : '—'}</td>
+            <td>${f.is_kev ? '<span class="kev-badge">KEV</span>' : ''}</td>
+        </tr>`;
+    }).join('');
+}
+
+function doExport(format) {
+    const assetID = document.getElementById('export-asset').value;
+    const sev = document.getElementById('export-sev').value;
+    let url = '/api/export/findings?format=' + format;
+    if (assetID) url += '&asset_id=' + assetID;
+    if (sev) url += '&severity=' + sev;
+    window.location.href = url;
+    return false;
+}
+
+function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+loadFindings();
+loadAssets();
+</script>
+{{end}}

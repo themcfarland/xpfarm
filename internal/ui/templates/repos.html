@@ -1,0 +1,214 @@
+{{define "title"}}Repo Scanner — XPFarm{{end}}
+{{define "content"}}
+<style>
+.repos-grid { display: grid; grid-template-columns: 360px 1fr; gap: 20px; }
+.panel { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; overflow: hidden; }
+.panel-header { padding: 14px 18px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; justify-content: space-between; }
+.panel-header h3 { margin: 0; font-size: 0.95rem; font-weight: 600; }
+.panel-body { padding: 18px; }
+.repo-card { background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; padding: 14px; margin-bottom: 10px; }
+.repo-card h4 { margin: 0 0 6px; font-size: 0.9rem; word-break: break-all; }
+.repo-card .meta { font-size: 0.78rem; color: var(--color-muted); }
+.repo-actions { display: flex; gap: 8px; margin-top: 10px; }
+.badge-sev { padding: 2px 8px; border-radius: 4px; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; }
+.sev-critical { background: #7f1d1d; color: #fecaca; }
+.sev-high     { background: #7c2d12; color: #fed7aa; }
+.sev-medium   { background: #78350f; color: #fde68a; }
+.sev-low      { background: #14532d; color: #bbf7d0; }
+.sev-info     { background: #1e3a5f; color: #bfdbfe; }
+#findings-panel { display: none; }
+</style>
+
+<div class="page-header">
+    <h2 class="page-title">Repo Scanner</h2>
+    <p class="page-subtitle">Scan Git repositories for secrets, SAST findings, and dependencies</p>
+</div>
+
+<div class="repos-grid">
+    <div>
+        <!-- Add Repo -->
+        <div class="panel" style="margin-bottom: 16px;">
+            <div class="panel-header"><h3>Add Repository</h3></div>
+            <div class="panel-body">
+                <div class="form-group" style="margin-bottom:10px;">
+                    <label style="font-size:0.82rem;color:var(--color-muted);">Git URL</label>
+                    <input type="text" id="repoUrl" placeholder="https://github.com/user/repo" style="width:100%;margin-top:4px;">
+                </div>
+                <div class="form-group" style="margin-bottom:12px;">
+                    <label style="font-size:0.82rem;color:var(--color-muted);">Branch</label>
+                    <input type="text" id="repoBranch" placeholder="main" style="width:100%;margin-top:4px;">
+                </div>
+                <button class="btn btn-primary" style="width:100%;" onclick="addRepo()">Add Repository</button>
+                <div id="add-status" style="margin-top:8px;font-size:0.82rem;"></div>
+            </div>
+        </div>
+
+        <!-- Repo List -->
+        <div class="panel">
+            <div class="panel-header">
+                <h3>Repositories</h3>
+                <button class="btn btn-secondary" style="padding:4px 10px;font-size:0.78rem;" onclick="loadRepos()">↻ Refresh</button>
+            </div>
+            <div class="panel-body" id="repo-list">
+                <p style="color:var(--color-muted);font-style:italic;">Loading...</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Findings Panel -->
+    <div class="panel" id="findings-panel">
+        <div class="panel-header">
+            <h3 id="findings-title">Findings</h3>
+            <div style="display:flex;gap:8px;align-items:center;">
+                <select id="sev-filter" onchange="filterFindings()" style="font-size:0.8rem;padding:3px 6px;background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:4px;color:var(--color-text);">
+                    <option value="">All Severities</option>
+                    <option value="critical">Critical</option>
+                    <option value="high">High</option>
+                    <option value="medium">Medium</option>
+                    <option value="low">Low</option>
+                </select>
+                <button class="btn btn-secondary" style="padding:4px 10px;font-size:0.78rem;" onclick="closeFindingsPanel()">✕</button>
+            </div>
+        </div>
+        <div style="padding:12px 18px;overflow-y:auto;max-height:calc(100vh - 280px);" id="findings-body">
+        </div>
+    </div>
+</div>
+
+<script>
+let allFindings = [];
+let currentRepoID = null;
+
+async function loadRepos() {
+    const r = await fetch('/api/repos');
+    const data = await r.json();
+    const list = document.getElementById('repo-list');
+    const repos = data.repos || [];
+    if (!repos.length) {
+        list.innerHTML = '<p style="color:var(--color-muted);font-style:italic;">No repositories added yet.</p>';
+        return;
+    }
+    list.innerHTML = repos.map(repo => `
+        <div class="repo-card">
+            <h4>${repo.url}</h4>
+            <div class="meta">Branch: ${repo.branch || 'main'} &nbsp;·&nbsp; Added: ${new Date(repo.created_at).toLocaleDateString()}</div>
+            <div class="repo-actions">
+                <button class="btn btn-primary" style="padding:4px 10px;font-size:0.78rem;" onclick="scanRepo(${repo.id}, this)">▶ Scan</button>
+                <button class="btn btn-secondary" style="padding:4px 10px;font-size:0.78rem;" onclick="loadFindings(${repo.id}, '${escHtml(repo.url)}')">Findings</button>
+                <button class="btn btn-secondary" style="padding:4px 10px;font-size:0.78rem;" onclick="loadSBOM(${repo.id})">SBOM</button>
+                <button class="btn exception-btn" style="padding:4px 10px;font-size:0.78rem;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid #ef4444;" onclick="deleteRepo(${repo.id})">✕</button>
+            </div>
+        </div>`).join('');
+}
+
+async function addRepo() {
+    const url = document.getElementById('repoUrl').value.trim();
+    const branch = document.getElementById('repoBranch').value.trim() || 'main';
+    const status = document.getElementById('add-status');
+    if (!url) { status.textContent = 'URL required'; status.style.color='#ef4444'; return; }
+    const r = await fetch('/api/repos/add', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({url, branch})
+    });
+    const d = await r.json();
+    if (r.ok) {
+        status.textContent = 'Added successfully';
+        status.style.color = '#10b981';
+        document.getElementById('repoUrl').value = '';
+        loadRepos();
+    } else {
+        status.textContent = d.error || 'Error';
+        status.style.color = '#ef4444';
+    }
+}
+
+async function scanRepo(id, btn) {
+    btn.disabled = true;
+    btn.textContent = '⟳ Scanning…';
+    const r = await fetch('/api/repos/scan/' + id, {method:'POST'});
+    if (r.ok) {
+        btn.textContent = '✓ Started';
+        setTimeout(() => { btn.textContent = '▶ Scan'; btn.disabled = false; }, 3000);
+    } else {
+        btn.textContent = 'Error';
+        btn.disabled = false;
+    }
+}
+
+async function loadFindings(id, url) {
+    currentRepoID = id;
+    document.getElementById('findings-title').textContent = 'Findings — ' + url;
+    document.getElementById('findings-panel').style.display = 'block';
+    const r = await fetch('/api/repos/' + id + '/findings');
+    const d = await r.json();
+    allFindings = d.findings || [];
+    renderFindings(allFindings);
+}
+
+function filterFindings() {
+    const sev = document.getElementById('sev-filter').value.toLowerCase();
+    renderFindings(sev ? allFindings.filter(f => f.severity?.toLowerCase() === sev) : allFindings);
+}
+
+function renderFindings(findings) {
+    const body = document.getElementById('findings-body');
+    if (!findings.length) {
+        body.innerHTML = '<p style="color:var(--color-muted);font-style:italic;">No findings.</p>';
+        return;
+    }
+    body.innerHTML = findings.map(f => `
+        <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;padding:12px;margin-bottom:8px;">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">
+                <span class="badge-sev sev-${(f.severity||'info').toLowerCase()}">${f.severity||'info'}</span>
+                <span style="font-weight:500;font-size:0.88rem;">${escHtml(f.name||f.title||'Finding')}</span>
+            </div>
+            <div style="font-size:0.78rem;color:var(--color-muted);">
+                ${f.source ? 'Source: ' + escHtml(f.source) + ' &nbsp;·&nbsp; ' : ''}
+                ${f.target ? 'Target: ' + escHtml(f.target) : ''}
+                ${f.cve_id ? ' &nbsp;·&nbsp; CVE: ' + escHtml(f.cve_id) : ''}
+            </div>
+            ${f.description ? '<div style="font-size:0.8rem;color:var(--color-text);margin-top:6px;line-height:1.5;">' + escHtml(f.description) + '</div>' : ''}
+        </div>`).join('');
+}
+
+async function loadSBOM(id) {
+    const r = await fetch('/api/repos/' + id + '/sbom');
+    const d = await r.json();
+    const deps = d.dependencies || [];
+    document.getElementById('findings-title').textContent = 'SBOM (' + deps.length + ' dependencies)';
+    document.getElementById('findings-panel').style.display = 'block';
+    allFindings = [];
+    const body = document.getElementById('findings-body');
+    if (!deps.length) { body.innerHTML = '<p style="color:var(--color-muted);">No SBOM data.</p>'; return; }
+    body.innerHTML = `<table style="width:100%;font-size:0.82rem;border-collapse:collapse;">
+        <thead><tr style="color:var(--color-muted);">
+            <th style="text-align:left;padding:4px 8px;">Package</th>
+            <th style="text-align:left;padding:4px 8px;">Version</th>
+            <th style="text-align:left;padding:4px 8px;">Ecosystem</th>
+        </tr></thead><tbody>
+        ${deps.map(d => `<tr style="border-top:1px solid var(--border-color);">
+            <td style="padding:4px 8px;">${escHtml(d.name||'')}</td>
+            <td style="padding:4px 8px;color:var(--color-muted);">${escHtml(d.version||'')}</td>
+            <td style="padding:4px 8px;color:var(--color-muted);">${escHtml(d.kind||d.ecosystem||'')}</td>
+        </tr>`).join('')}
+        </tbody></table>`;
+}
+
+async function deleteRepo(id) {
+    if (!confirm('Delete this repository and all its findings?')) return;
+    await fetch('/api/repos/' + id, {method:'DELETE'});
+    loadRepos();
+}
+
+function closeFindingsPanel() {
+    document.getElementById('findings-panel').style.display = 'none';
+}
+
+function escHtml(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+loadRepos();
+</script>
+{{end}}

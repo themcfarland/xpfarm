@@ -676,6 +676,16 @@
                 <span class="full-text">Scan Graph</span><span class="short-text">SG</span>
             </a>
 
+            <!-- Findings -->
+            <a href="/findings" class="nav-link {{if eq .Page `findings`}}active{{end}}" title="Findings">
+                <span class="full-text">Findings</span><span class="short-text">F</span>
+            </a>
+
+            <!-- Scan History -->
+            <a href="/history" class="nav-link {{if eq .Page `history`}}active{{end}}" title="Scan History">
+                <span class="full-text">Scan History</span><span class="short-text">SH</span>
+            </a>
+
             <!-- Reports -->
             <a href="/reports" class="nav-link {{if eq .Page `reports`}}active{{end}}" title="Reports">
                 <span class="full-text">Reports</span><span class="short-text">R</span>
@@ -689,6 +699,16 @@
             <!-- Workers -->
             <a href="/workers" class="nav-link {{if eq .Page `workers`}}active{{end}}" title="Workers">
                 <span class="full-text">Workers</span><span class="short-text">W</span>
+            </a>
+
+            <!-- Scheduled Scans -->
+            <a href="/schedules" class="nav-link {{if eq .Page `schedules`}}active{{end}}" title="Schedules">
+                <span class="full-text">Schedules</span><span class="short-text">SC</span>
+            </a>
+
+            <!-- Repo Scanner -->
+            <a href="/repos" class="nav-link {{if eq .Page `repos`}}active{{end}}" title="Repo Scanner">
+                <span class="full-text">Repo Scanner</span><span class="short-text">RS</span>
             </a>
 
             <!-- Overlord -->
@@ -705,6 +725,11 @@
             <!-- Separator -->
             <hr style="border: 0; border-top: 1px solid var(--border-color); margin: 15px 0;">
 
+            <!-- Nuclei Templates -->
+            <a href="/nuclei" class="nav-link {{if eq .Page `nuclei`}}active{{end}}" title="Nuclei Templates">
+                <span class="full-text">Nuclei Templates</span><span class="short-text">NT</span>
+            </a>
+
             <!-- Modules -->
             <a href="/modules" class="nav-link {{if eq .Page `modules`}}active{{end}}" title="Modules">
                 <span class="full-text">Modules</span><span class="short-text">M</span>
@@ -719,12 +744,29 @@
                     <a href="/settings?tab=env" class="sub-link">Environment Variables</a>
                     <a href="/settings?tab=notifications" class="sub-link">Notification Integration</a>
                     <a href="/settings?tab=ai" class="sub-link">AI Provider</a>
+                    <a href="/settings?tab=security" class="sub-link">Access Control</a>
                 </div>
             </details>
+
+            <!-- Logout (visible only when password is set) -->
+            <a href="#" class="nav-link" id="logout-btn" title="Logout" style="display:none;" onclick="doLogout()">
+                <span class="full-text">Logout</span><span class="short-text">→</span>
+            </a>
         </div>
 
         <div class="toggle-btn" onclick="toggleSidebar()">«</div>
     </div>
+    <script>
+    // Show logout button only if a session cookie is present
+    if (document.cookie.includes('xpf_session')) {
+        const btn = document.getElementById('logout-btn');
+        if (btn) btn.style.display = '';
+    }
+    async function doLogout() {
+        await fetch('/api/auth/logout', {method:'POST'});
+        window.location.href = '/login';
+    }
+    </script>
 
     <!-- Main Content -->
     <div class="main-content">

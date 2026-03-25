@@ -2,8 +2,11 @@ package ui
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	"embed"
 	"encoding/csv"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"html/template"
@@ -13,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"xpfarm/internal/core"
@@ -38,6 +42,8 @@ import (
 	"xpfarm/internal/distributed/controller"
 	jobstore "xpfarm/internal/storage/jobs"
 	workerstore "xpfarm/internal/storage/workers"
+	schedulestore "xpfarm/internal/storage/schedules"
+	scanhistorystore "xpfarm/internal/storage/scanhistory"
 	"xpfarm/pkg/utils"
 
 	"github.com/gin-gonic/gin"
@@ -82,6 +88,121 @@ func csrfGuard() gin.HandlerFunc {
 	}
 }
 
+// rateLimiter returns a simple per-IP token bucket middleware.
+// Each IP gets burst capacity with refill at rate requests/second.
+func rateLimiter(rate int, burst int) gin.HandlerFunc {
+	type bucket struct {
+		tokens    int64
+		lastRefil int64 // unix nanos
+	}
+	var mu sync.Mutex
+	buckets := map[string]*bucket{}
+
+	return func(c *gin.Context) {
+		ip := c.ClientIP()
+		now := time.Now().UnixNano()
+		mu.Lock()
+		b, ok := buckets[ip]
+		if !ok {
+			b = &bucket{tokens: int64(burst), lastRefil: now}
+			buckets[ip] = b
+		}
+		// Refill tokens based on elapsed time
+		elapsed := now - atomic.LoadInt64(&b.lastRefil)
+		refill := int64(float64(elapsed) / float64(time.Second) * float64(rate))
+		if refill > 0 {
+			b.tokens += refill
+			if b.tokens > int64(burst) {
+				b.tokens = int64(burst)
+			}
+			atomic.StoreInt64(&b.lastRefil, now)
+		}
+		if b.tokens <= 0 {
+			mu.Unlock()
+			c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "rate limit exceeded"})
+			return
+		}
+		b.tokens--
+		mu.Unlock()
+		c.Next()
+	}
+}
+
+const authCookieName = "xpf_session"
+const authSettingKey = "ui_password_hash"
+
+// hashPassword returns a SHA-256 hex hash of the password with a static salt.
+func hashPassword(pw string) string {
+	h := sha256.Sum256([]byte("xpfarm:" + pw))
+	return hex.EncodeToString(h[:])
+}
+
+// generateSessionToken returns a 32-byte random hex token.
+func generateSessionToken() string {
+	b := make([]byte, 32)
+	rand.Read(b) //nolint:errcheck
+	return hex.EncodeToString(b)
+}
+
+// sessionStore maps token → expiry (in-memory, resets on restart)
+var (
+	sessionMu    sync.RWMutex
+	sessionStore = map[string]time.Time{}
+)
+
+func isValidSession(token string) bool {
+	sessionMu.RLock()
+	exp, ok := sessionStore[token]
+	sessionMu.RUnlock()
+	return ok && time.Now().Before(exp)
+}
+
+func createSession() string {
+	tok := generateSessionToken()
+	sessionMu.Lock()
+	sessionStore[tok] = time.Now().Add(24 * time.Hour)
+	sessionMu.Unlock()
+	return tok
+}
+
+func destroySession(token string) {
+	sessionMu.Lock()
+	delete(sessionStore, token)
+	sessionMu.Unlock()
+}
+
+// authRequired middleware — skips auth if no password is configured.
+func authRequired(db *gorm.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		// Check if password is set
+		var setting database.Setting
+		if err := db.Where("key = ?", authSettingKey).First(&setting).Error; err != nil || setting.Value == "" {
+			// No password configured — allow all access
+			c.Next()
+			return
+		}
+		// Skip auth for login page and static assets
+		path := c.Request.URL.Path
+		if path == "/login" || path == "/api/auth/login" || path == "/api/auth/logout" ||
+			strings.HasPrefix(path, "/static/") || path == "/favicon.ico" {
+			c.Next()
+			return
+		}
+		// Check session cookie
+		token, err := c.Cookie(authCookieName)
+		if err != nil || !isValidSession(token) {
+			if strings.HasPrefix(path, "/api/") {
+				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+			} else {
+				c.Redirect(http.StatusFound, "/login")
+				c.Abort()
+			}
+			return
+		}
+		c.Next()
+	}
+}
+
 func StartServer(port string) error {
 	// Debug mode is already set in main.go via flag.Parse() and gin.SetMode().
 	// Check if Gin is in debug mode to enable the logger middleware.
@@ -91,6 +212,8 @@ func StartServer(port string) error {
 	r := gin.New()
 	r.Use(gin.Recovery())
 	r.Use(csrfGuard())
+	r.Use(rateLimiter(60, 120)) // 60 req/s, burst 120
+	r.Use(authRequired(database.GetDB()))
 	if isDebug {
 		r.Use(gin.Logger())
 	}
@@ -121,7 +244,7 @@ func StartServer(port string) error {
 		return err
 	}
 
-	pages := []string{"dashboard.html", "assets.html", "asset_details.html", "target_details.html", "modules.html", "settings.html", "target.html", "overlord.html", "overlord_binary.html", "search.html", "advanced_scan.html", "scan_settings.html", "reports.html", "planner.html", "workers.html", "graph.html", "asset.html", "index.html"}
+	pages := []string{"dashboard.html", "assets.html", "asset_details.html", "target_details.html", "modules.html", "settings.html", "target.html", "overlord.html", "overlord_binary.html", "search.html", "advanced_scan.html", "scan_settings.html", "reports.html", "planner.html", "workers.html", "graph.html", "asset.html", "index.html", "repos.html", "nuclei.html", "schedules.html", "history.html", "findings.html", "login.html"}
 
 	for _, page := range pages {
 		pageContent, err := f.ReadFile("templates/" + page)
@@ -2699,7 +2822,562 @@ func StartServer(port string) error {
 		c.JSON(http.StatusOK, gin.H{"status": "recorded"})
 	})
 
+	// -------------------------------------------------------------------------
+	// Authentication
+	// -------------------------------------------------------------------------
+
+	// GET /login — login page
+	r.GET("/login", func(c *gin.Context) {
+		c.HTML(http.StatusOK, "login.html", gin.H{"Page": "login"})
+	})
+
+	// POST /api/auth/login
+	r.POST("/api/auth/login", func(c *gin.Context) {
+		var body struct {
+			Password string `json:"password" form:"password"`
+		}
+		c.ShouldBind(&body) //nolint:errcheck
+		var setting database.Setting
+		if err := database.GetDB().Where("key = ?", authSettingKey).First(&setting).Error; err != nil || setting.Value == "" {
+			c.JSON(http.StatusOK, gin.H{"status": "ok"})
+			return
+		}
+		if hashPassword(body.Password) != setting.Value {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid password"})
+			return
+		}
+		tok := createSession()
+		c.SetCookie(authCookieName, tok, 86400, "/", "", false, true)
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	// POST /api/auth/logout
+	r.POST("/api/auth/logout", func(c *gin.Context) {
+		if tok, err := c.Cookie(authCookieName); err == nil {
+			destroySession(tok)
+		}
+		c.SetCookie(authCookieName, "", -1, "/", "", false, true)
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	// POST /api/settings/password — set or change the UI password
+	r.POST("/api/settings/password", func(c *gin.Context) {
+		var body struct {
+			Password string `json:"password"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		value := ""
+		if body.Password != "" {
+			value = hashPassword(body.Password)
+		}
+		db := database.GetDB()
+		var s database.Setting
+		db.Where("key = ?", authSettingKey).First(&s)
+		s.Key = authSettingKey
+		s.Value = value
+		s.Description = "UI access password (SHA-256 hashed)"
+		db.Save(&s)
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	// -------------------------------------------------------------------------
+	// Repo Scanner UI
+	// -------------------------------------------------------------------------
+
+	r.GET("/repos", func(c *gin.Context) {
+		c.HTML(http.StatusOK, "repos.html", getGlobalContext(gin.H{"Page": "repos"}))
+	})
+
+	// -------------------------------------------------------------------------
+	// Nuclei Template Browser
+	// -------------------------------------------------------------------------
+
+	r.GET("/nuclei", func(c *gin.Context) {
+		c.HTML(http.StatusOK, "nuclei.html", getGlobalContext(gin.H{"Page": "nuclei"}))
+	})
+
+	// -------------------------------------------------------------------------
+	// Scheduled Scans
+	// -------------------------------------------------------------------------
+
+	r.GET("/schedules", func(c *gin.Context) {
+		c.HTML(http.StatusOK, "schedules.html", getGlobalContext(gin.H{"Page": "schedules"}))
+	})
+
+	r.GET("/api/schedules", func(c *gin.Context) {
+		list, err := schedulestore.List(database.GetDB())
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"schedules": list})
+	})
+
+	r.POST("/api/schedules", func(c *gin.Context) {
+		var body struct {
+			AssetID   uint   `json:"asset_id"`
+			IntervalH int    `json:"interval_h"`
+			Label     string `json:"label"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil || body.AssetID == 0 || body.IntervalH < 1 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "asset_id and interval_h (>=1) required"})
+			return
+		}
+		var asset database.Asset
+		if err := database.GetDB().First(&asset, body.AssetID).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "asset not found"})
+			return
+		}
+		label := body.Label
+		if label == "" {
+			label = fmt.Sprintf("Every %dh", body.IntervalH)
+		}
+		rec := &schedulestore.ScheduleRecord{
+			AssetID:   body.AssetID,
+			AssetName: asset.Name,
+			Label:     label,
+			IntervalH: body.IntervalH,
+			Enabled:   true,
+			NextRunAt: time.Now().Add(time.Duration(body.IntervalH) * time.Hour),
+		}
+		if err := schedulestore.Create(database.GetDB(), rec); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusCreated, rec)
+	})
+
+	r.POST("/api/schedules/:id/toggle", func(c *gin.Context) {
+		var id uint
+		fmt.Sscanf(c.Param("id"), "%d", &id)
+		rec, err := schedulestore.GetByID(database.GetDB(), id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "schedule not found"})
+			return
+		}
+		schedulestore.SetEnabled(database.GetDB(), id, !rec.Enabled) //nolint:errcheck
+		c.JSON(http.StatusOK, gin.H{"enabled": !rec.Enabled})
+	})
+
+	r.DELETE("/api/schedules/:id", func(c *gin.Context) {
+		var id uint
+		fmt.Sscanf(c.Param("id"), "%d", &id)
+		schedulestore.Delete(database.GetDB(), id) //nolint:errcheck
+		c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+	})
+
+	// Background goroutine: check for due schedules every minute and fire scans.
+	go func() {
+		ticker := time.NewTicker(time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			due, err := schedulestore.ListDue(database.GetDB())
+			if err != nil {
+				continue
+			}
+			for _, s := range due {
+				schedulestore.MarkRan(database.GetDB(), s.ID)     //nolint:errcheck
+				schedulestore.BumpNextRun(database.GetDB(), s.ID, s.IntervalH) //nolint:errcheck
+				var asset database.Asset
+				if database.GetDB().Preload("Targets").First(&asset, s.AssetID).Error != nil {
+					continue
+				}
+				for _, t := range asset.Targets {
+					go core.GetManager().StartScan(t.Value, asset.Name)
+				}
+			}
+		}
+	}()
+
+	// -------------------------------------------------------------------------
+	// Scan History & Diffing
+	// -------------------------------------------------------------------------
+
+	r.GET("/history", func(c *gin.Context) {
+		c.HTML(http.StatusOK, "history.html", getGlobalContext(gin.H{"Page": "history"}))
+	})
+
+	r.GET("/api/history/:assetID", func(c *gin.Context) {
+		var assetID uint
+		fmt.Sscanf(c.Param("assetID"), "%d", &assetID)
+		snaps, err := scanhistorystore.ListByAsset(database.GetDB(), assetID, 20)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"snapshots": snaps})
+	})
+
+	r.GET("/api/history/snapshot/:id", func(c *gin.Context) {
+		var id uint
+		fmt.Sscanf(c.Param("id"), "%d", &id)
+		snap, findings, err := scanhistorystore.GetByID(database.GetDB(), id)
+		if err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "snapshot not found"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"snapshot": snap, "findings": findings})
+	})
+
+	r.GET("/api/history/diff/:idA/:idB", func(c *gin.Context) {
+		var idA, idB uint
+		fmt.Sscanf(c.Param("idA"), "%d", &idA)
+		fmt.Sscanf(c.Param("idB"), "%d", &idB)
+		_, findingsA, errA := scanhistorystore.GetByID(database.GetDB(), idA)
+		_, findingsB, errB := scanhistorystore.GetByID(database.GetDB(), idB)
+		if errA != nil || errB != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "one or both snapshots not found"})
+			return
+		}
+		diff := scanhistorystore.Diff(findingsA, findingsB)
+		c.JSON(http.StatusOK, diff)
+	})
+
+	// POST /api/history/snapshot — manually capture a snapshot of an asset now
+	r.POST("/api/history/snapshot", func(c *gin.Context) {
+		var body struct {
+			AssetID uint `json:"asset_id"`
+		}
+		if err := c.ShouldBindJSON(&body); err != nil || body.AssetID == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "asset_id required"})
+			return
+		}
+		snap, findings, err := captureSnapshot(database.GetDB(), body.AssetID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if saveErr := scanhistorystore.Save(database.GetDB(), snap, findings); saveErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": saveErr.Error()})
+			return
+		}
+		scanhistorystore.PruneOld(database.GetDB(), body.AssetID, 50) //nolint:errcheck
+		c.JSON(http.StatusCreated, gin.H{"snapshot": snap, "findings_count": len(findings)})
+	})
+
+	r.DELETE("/api/history/snapshot/:id", func(c *gin.Context) {
+		var id uint
+		fmt.Sscanf(c.Param("id"), "%d", &id)
+		scanhistorystore.Delete(database.GetDB(), id) //nolint:errcheck
+		c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+	})
+
+	// -------------------------------------------------------------------------
+	// Findings Dedup View
+	// -------------------------------------------------------------------------
+
+	r.GET("/findings", func(c *gin.Context) {
+		c.HTML(http.StatusOK, "findings.html", getGlobalContext(gin.H{"Page": "findings"}))
+	})
+
+	// GET /api/findings/deduplicated — aggregate findings across all assets
+	r.GET("/api/findings/deduplicated", func(c *gin.Context) {
+		db := database.GetDB()
+		type Row struct {
+			Name          string  `json:"name"`
+			Severity      string  `json:"severity"`
+			TemplateID    string  `json:"template_id"`
+			CveID         string  `json:"cve_id"`
+			AffectedCount int     `json:"affected_count"`
+			MaxCVSS       float64 `json:"max_cvss"`
+			IsKEV         bool    `json:"is_kev"`
+		}
+
+		severity := c.Query("severity")
+
+		var vulns []database.Vulnerability
+		q := db.Select("name, severity, template_id, matched_at")
+		if severity != "" {
+			q = q.Where("LOWER(severity) = ?", strings.ToLower(severity))
+		}
+		q.Find(&vulns)
+
+		// Deduplicate by name+templateID
+		type key struct{ Name, TemplateID string }
+		agg := map[key]*Row{}
+		for _, v := range vulns {
+			k := key{v.Name, v.TemplateID}
+			if _, ok := agg[k]; !ok {
+				agg[k] = &Row{Name: v.Name, Severity: v.Severity, TemplateID: v.TemplateID}
+			}
+			agg[k].AffectedCount++
+		}
+
+		// CVEs
+		var cves []database.CVE
+		cq := db.Select("cve_id, severity, cvss_score, is_kev, product")
+		if severity != "" {
+			cq = cq.Where("LOWER(severity) = ?", strings.ToLower(severity))
+		}
+		cq.Find(&cves)
+		for _, c := range cves {
+			k := key{c.CveID, ""}
+			if _, ok := agg[k]; !ok {
+				agg[k] = &Row{Name: c.CveID, Severity: c.Severity, CveID: c.CveID, IsKEV: c.IsKEV}
+			}
+			agg[k].AffectedCount++
+			if c.CvssScore > agg[k].MaxCVSS {
+				agg[k].MaxCVSS = c.CvssScore
+			}
+			if c.IsKEV {
+				agg[k].IsKEV = true
+			}
+		}
+
+		rows := make([]Row, 0, len(agg))
+		for _, v := range agg {
+			rows = append(rows, *v)
+		}
+		sort.Slice(rows, func(i, j int) bool {
+			order := map[string]int{"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+			a := order[strings.ToLower(rows[i].Severity)]
+			b := order[strings.ToLower(rows[j].Severity)]
+			if a != b {
+				return a < b
+			}
+			return rows[i].AffectedCount > rows[j].AffectedCount
+		})
+		c.JSON(http.StatusOK, gin.H{"findings": rows, "total": len(rows)})
+	})
+
+	// -------------------------------------------------------------------------
+	// Export Findings
+	// -------------------------------------------------------------------------
+
+	// GET /api/export/findings?format=csv|json&severity=&asset_id=
+	r.GET("/api/export/findings", func(c *gin.Context) {
+		format := c.DefaultQuery("format", "json")
+		severity := c.Query("severity")
+		assetIDStr := c.Query("asset_id")
+
+		db := database.GetDB()
+
+		type ExportRow struct {
+			AssetName   string  `json:"asset_name" csv:"Asset"`
+			Target      string  `json:"target" csv:"Target"`
+			Type        string  `json:"type" csv:"Type"`
+			Name        string  `json:"name" csv:"Name"`
+			Severity    string  `json:"severity" csv:"Severity"`
+			TemplateID  string  `json:"template_id" csv:"Template ID"`
+			CveID       string  `json:"cve_id" csv:"CVE ID"`
+			CVSS        float64 `json:"cvss" csv:"CVSS"`
+			IsKEV       bool    `json:"is_kev" csv:"KEV"`
+			DiscoveredAt string `json:"discovered_at" csv:"Discovered"`
+		}
+
+		var rows []ExportRow
+
+		// Build asset→name map
+		var assets []database.Asset
+		db.Find(&assets)
+		assetNames := map[uint]string{}
+		for _, a := range assets {
+			assetNames[a.ID] = a.Name
+		}
+
+		// Targets filter
+		targetFilter := []uint{}
+		if assetIDStr != "" {
+			var assetID uint
+			fmt.Sscanf(assetIDStr, "%d", &assetID)
+			var targets []database.Target
+			db.Where("asset_id = ?", assetID).Find(&targets)
+			for _, t := range targets {
+				targetFilter = append(targetFilter, t.ID)
+			}
+		}
+
+		// Vulnerabilities
+		var vulns []database.Vulnerability
+		vq := db
+		if severity != "" {
+			vq = vq.Where("LOWER(severity) = ?", strings.ToLower(severity))
+		}
+		if len(targetFilter) > 0 {
+			vq = vq.Where("target_id IN ?", targetFilter)
+		}
+		vq.Find(&vulns)
+
+		for _, v := range vulns {
+			var t database.Target
+			db.First(&t, v.TargetID)
+			rows = append(rows, ExportRow{
+				AssetName:   assetNames[t.AssetID],
+				Target:      t.Value,
+				Type:        "vulnerability",
+				Name:        v.Name,
+				Severity:    v.Severity,
+				TemplateID:  v.TemplateID,
+				DiscoveredAt: v.CreatedAt.Format(time.RFC3339),
+			})
+		}
+
+		// CVEs
+		var cves []database.CVE
+		cq := db
+		if severity != "" {
+			cq = cq.Where("LOWER(severity) = ?", strings.ToLower(severity))
+		}
+		if len(targetFilter) > 0 {
+			cq = cq.Where("target_id IN ?", targetFilter)
+		}
+		cq.Find(&cves)
+
+		for _, cv := range cves {
+			var t database.Target
+			db.First(&t, cv.TargetID)
+			rows = append(rows, ExportRow{
+				AssetName:   assetNames[t.AssetID],
+				Target:      t.Value,
+				Type:        "cve",
+				Name:        cv.CveID + " — " + cv.Product,
+				Severity:    cv.Severity,
+				CveID:       cv.CveID,
+				CVSS:        cv.CvssScore,
+				IsKEV:       cv.IsKEV,
+				DiscoveredAt: cv.CreatedAt.Format(time.RFC3339),
+			})
+		}
+
+		if format == "csv" {
+			c.Header("Content-Disposition", "attachment; filename=findings.csv")
+			c.Header("Content-Type", "text/csv")
+			w := csv.NewWriter(c.Writer)
+			w.Write([]string{"Asset", "Target", "Type", "Name", "Severity", "Template ID", "CVE ID", "CVSS", "KEV", "Discovered"}) //nolint:errcheck
+			for _, r := range rows {
+				kev := "false"
+				if r.IsKEV {
+					kev = "true"
+				}
+				w.Write([]string{r.AssetName, r.Target, r.Type, r.Name, r.Severity, r.TemplateID, r.CveID, fmt.Sprintf("%.1f", r.CVSS), kev, r.DiscoveredAt}) //nolint:errcheck
+			}
+			w.Flush()
+			return
+		}
+
+		c.Header("Content-Disposition", "attachment; filename=findings.json")
+		c.JSON(http.StatusOK, gin.H{"findings": rows, "total": len(rows)})
+	})
+
+	// -------------------------------------------------------------------------
+	// Target Import
+	// -------------------------------------------------------------------------
+
+	// POST /api/assets/:id/import — bulk import targets from text (one per line)
+	r.POST("/api/assets/:id/import", func(c *gin.Context) {
+		var assetID uint
+		fmt.Sscanf(c.Param("id"), "%d", &assetID)
+		var asset database.Asset
+		if err := database.GetDB().First(&asset, assetID).Error; err != nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "asset not found"})
+			return
+		}
+
+		var body struct {
+			Targets string `json:"targets"` // newline-separated
+		}
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+
+		type ImportResult struct {
+			Target string `json:"target"`
+			Status string `json:"status"`
+			Detail string `json:"detail"`
+		}
+		var results []ImportResult
+		added := 0
+
+		lines := strings.Split(strings.ReplaceAll(body.Targets, "\r\n", "\n"), "\n")
+		for _, line := range lines {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			normalized := core.NormalizeToHostname(line)
+			if normalized == "" {
+				normalized = line
+			}
+			parsed := core.ParseTarget(normalized)
+			if parsed.Type == "" {
+				results = append(results, ImportResult{Target: line, Status: "skip", Detail: "invalid target"})
+				continue
+			}
+			var existing database.Target
+			if database.GetDB().Where("value = ? AND asset_id = ?", normalized, assetID).First(&existing).Error == nil {
+				results = append(results, ImportResult{Target: normalized, Status: "skip", Detail: "already exists"})
+				continue
+			}
+			t := database.Target{
+				Value:   normalized,
+				AssetID: assetID,
+				Type:    string(parsed.Type),
+			}
+			if err := database.GetDB().Create(&t).Error; err != nil {
+				results = append(results, ImportResult{Target: normalized, Status: "error", Detail: err.Error()})
+			} else {
+				results = append(results, ImportResult{Target: normalized, Status: "added"})
+				added++
+			}
+		}
+
+		c.JSON(http.StatusOK, gin.H{"added": added, "results": results})
+	})
+
 	return r.Run(":" + port)
+}
+
+// captureSnapshot reads the current state of an asset from the DB and returns
+// a ScanSnapshot + findings slice ready to be persisted.
+func captureSnapshot(db *gorm.DB, assetID uint) (*scanhistorystore.ScanSnapshot, []scanhistorystore.SnapshotFinding, error) {
+	var asset database.Asset
+	if err := db.Preload("Targets").First(&asset, assetID).Error; err != nil {
+		return nil, nil, err
+	}
+
+	var portCount int64
+	var findings []scanhistorystore.SnapshotFinding
+
+	for _, t := range asset.Targets {
+		var ports []database.Port
+		db.Where("target_id = ?", t.ID).Find(&ports)
+		portCount += int64(len(ports))
+
+		var vulns []database.Vulnerability
+		db.Where("target_id = ?", t.ID).Find(&vulns)
+		for _, v := range vulns {
+			findings = append(findings, scanhistorystore.SnapshotFinding{
+				TargetValue: t.Value,
+				Name:        v.Name,
+				Severity:    v.Severity,
+				TemplateID:  v.TemplateID,
+			})
+		}
+
+		var cves []database.CVE
+		db.Where("target_id = ?", t.ID).Find(&cves)
+		for _, cv := range cves {
+			findings = append(findings, scanhistorystore.SnapshotFinding{
+				TargetValue: t.Value,
+				Name:        cv.CveID,
+				Severity:    cv.Severity,
+				CveID:       cv.CveID,
+			})
+		}
+	}
+
+	snap := &scanhistorystore.ScanSnapshot{
+		AssetID:     assetID,
+		AssetName:   asset.Name,
+		ScannedAt:   time.Now().UTC(),
+		TargetCount: len(asset.Targets),
+		PortCount:   int(portCount),
+	}
+	return snap, findings, nil
 }
 
 // MultiRender implements gin.HTMLRender

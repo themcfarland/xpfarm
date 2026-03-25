@@ -1,0 +1,141 @@
+{{define "title"}}Nuclei Templates — XPFarm{{end}}
+{{define "content"}}
+<style>
+.nt-toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 16px; }
+.nt-toolbar input { flex: 1; min-width: 200px; }
+.sev-pill { padding: 4px 12px; border-radius: 20px; font-size: 0.78rem; font-weight: 600; cursor: pointer; border: 1px solid transparent; transition: opacity .15s; }
+.sev-pill.active { opacity: 1; }
+.sev-pill:not(.active) { opacity: 0.4; }
+.sev-critical { background:#7f1d1d;color:#fecaca; }
+.sev-high     { background:#7c2d12;color:#fed7aa; }
+.sev-medium   { background:#78350f;color:#fde68a; }
+.sev-low      { background:#14532d;color:#bbf7d0; }
+.sev-info     { background:#1e3a5f;color:#bfdbfe; }
+.sev-unknown  { background:#374151;color:#d1d5db; }
+.nt-table     { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+.nt-table th  { text-align: left; padding: 8px 10px; color: var(--color-muted); font-weight: 500; border-bottom: 1px solid var(--border-color); position: sticky; top: 0; background: var(--bg-card); }
+.nt-table td  { padding: 6px 10px; border-bottom: 1px solid var(--border-color); }
+.nt-table tr:hover td { background: var(--bg-hover); }
+.nt-count { font-size: 0.8rem; color: var(--color-muted); }
+.tag-chip { display: inline-block; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 4px; padding: 1px 6px; font-size: 0.72rem; color: var(--color-muted); margin: 1px; }
+</style>
+
+<div class="page-header" style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+    <div>
+        <h2 class="page-title" style="margin:0;">Nuclei Templates</h2>
+        <p class="page-subtitle" style="margin:4px 0 0;">Browse and filter your indexed vulnerability templates</p>
+    </div>
+    <div style="display:flex;gap:8px;">
+        <span id="tmpl-count" class="nt-count"></span>
+        <button class="btn btn-secondary" style="padding:6px 14px;font-size:0.82rem;" onclick="refreshTemplates()">↻ Re-index</button>
+    </div>
+</div>
+
+<div class="card" style="padding:16px;">
+    <div class="nt-toolbar">
+        <input type="text" id="search" placeholder="Search by name, template ID, or tag…" oninput="applyFilters()">
+        <div id="sev-filters" style="display:flex;gap:6px;flex-wrap:wrap;"></div>
+        <select id="proto-filter" onchange="applyFilters()" style="padding:6px 10px;background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:6px;color:var(--color-text);font-size:0.82rem;">
+            <option value="">All Protocols</option>
+        </select>
+    </div>
+
+    <div style="overflow-x:auto;max-height:calc(100vh - 280px);overflow-y:auto;">
+        <table class="nt-table">
+            <thead>
+                <tr>
+                    <th>Template ID</th>
+                    <th>Name</th>
+                    <th>Severity</th>
+                    <th>Tags</th>
+                    <th>Protocol</th>
+                </tr>
+            </thead>
+            <tbody id="tmpl-body">
+                <tr><td colspan="5" style="text-align:center;color:var(--color-muted);padding:20px;">Loading templates…</td></tr>
+            </tbody>
+        </table>
+    </div>
+</div>
+
+<script>
+let allTemplates = [];
+let activeSevs = new Set();
+
+async function loadTemplates() {
+    const r = await fetch('/api/nuclei/templates?limit=5000');
+    const d = await r.json();
+    allTemplates = d.templates || [];
+
+    // Build severity pills
+    const sevs = ['critical','high','medium','low','info'];
+    const sevFilters = document.getElementById('sev-filters');
+    sevFilters.innerHTML = sevs.map(s => `
+        <span class="sev-pill sev-${s} active" data-sev="${s}" onclick="toggleSev('${s}', this)">${s.charAt(0).toUpperCase()+s.slice(1)}</span>
+    `).join('');
+    activeSevs = new Set(sevs);
+
+    // Build protocol options
+    const protos = [...new Set(allTemplates.flatMap(t => (t.protocols||'').split(',').map(p=>p.trim()).filter(Boolean)))].sort();
+    const protoSel = document.getElementById('proto-filter');
+    protos.forEach(p => {
+        const opt = document.createElement('option');
+        opt.value = p; opt.textContent = p;
+        protoSel.appendChild(opt);
+    });
+
+    applyFilters();
+}
+
+function toggleSev(sev, el) {
+    if (activeSevs.has(sev)) { activeSevs.delete(sev); el.classList.remove('active'); }
+    else { activeSevs.add(sev); el.classList.add('active'); }
+    applyFilters();
+}
+
+function applyFilters() {
+    const q = document.getElementById('search').value.toLowerCase();
+    const proto = document.getElementById('proto-filter').value;
+    const filtered = allTemplates.filter(t => {
+        if (!activeSevs.has((t.severity||'info').toLowerCase())) return false;
+        if (proto && !(t.protocols||'').includes(proto)) return false;
+        if (q && !t.template_id?.toLowerCase().includes(q) && !t.name?.toLowerCase().includes(q) && !t.tags?.toLowerCase().includes(q)) return false;
+        return true;
+    });
+    document.getElementById('tmpl-count').textContent = filtered.length + ' / ' + allTemplates.length + ' templates';
+    const tbody = document.getElementById('tmpl-body');
+    if (!filtered.length) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--color-muted);padding:20px;">No templates match filters.</td></tr>';
+        return;
+    }
+    // Render up to 500 rows for performance
+    const slice = filtered.slice(0, 500);
+    tbody.innerHTML = slice.map(t => {
+        const sev = (t.severity||'info').toLowerCase();
+        const tags = (t.tags||'').split(',').map(s=>s.trim()).filter(Boolean);
+        return `<tr>
+            <td style="font-family:monospace;font-size:0.78rem;color:var(--color-primary);">${escHtml(t.template_id||'')}</td>
+            <td>${escHtml(t.name||'')}</td>
+            <td><span class="sev-pill sev-${sev}" style="cursor:default;">${sev}</span></td>
+            <td style="max-width:260px;">${tags.slice(0,6).map(tg=>`<span class="tag-chip">${escHtml(tg)}</span>`).join('')}${tags.length>6?'<span class="tag-chip">+'+( tags.length-6)+'</span>':''}</td>
+            <td style="font-size:0.78rem;color:var(--color-muted);">${escHtml(t.protocols||'')}</td>
+        </tr>`;
+    }).join('');
+    if (filtered.length > 500) {
+        tbody.innerHTML += `<tr><td colspan="5" style="text-align:center;color:var(--color-muted);padding:10px;font-style:italic;">Showing 500 of ${filtered.length} — refine search to see more</td></tr>`;
+    }
+}
+
+async function refreshTemplates() {
+    const btn = event.target;
+    btn.disabled = true; btn.textContent = '⟳ Re-indexing…';
+    const r = await fetch('/api/nuclei/templates/refresh', {method:'POST'});
+    btn.textContent = r.ok ? '✓ Done' : 'Error';
+    setTimeout(() => { btn.textContent = '↻ Re-index'; btn.disabled = false; loadTemplates(); }, 2000);
+}
+
+function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+loadTemplates();
+</script>
+{{end}}

@@ -15,6 +15,8 @@ import (
 	planstore "xpfarm/internal/storage/plans"
 	workerstore "xpfarm/internal/storage/workers"
 	jobstore "xpfarm/internal/storage/jobs"
+	schedulestore "xpfarm/internal/storage/schedules"
+	scanhistorystore "xpfarm/internal/storage/scanhistory"
 	"xpfarm/pkg/utils"
 
 	_ "xpfarm/internal/normalization/all" // register all adapters + enrichers
@@ -70,6 +72,12 @@ ____  ________________________
 	}
 	if err := jobstore.Migrate(database.GetDB()); err != nil {
 		log.Fatalf("failed to migrate job tables: %v", err)
+	}
+	if err := schedulestore.Migrate(database.GetDB()); err != nil {
+		log.Fatalf("failed to migrate schedule tables: %v", err)
+	}
+	if err := scanhistorystore.Migrate(database.GetDB()); err != nil {
+		log.Fatalf("failed to migrate scan history tables: %v", err)
 	}
 
 	// 2. Register built-in modules

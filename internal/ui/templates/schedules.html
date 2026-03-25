@@ -1,0 +1,134 @@
+{{define "title"}}Scheduled Scans — XPFarm{{end}}
+{{define "content"}}
+<style>
+.sched-grid { display: grid; grid-template-columns: 340px 1fr; gap: 20px; }
+.panel { background: var(--bg-card); border: 1px solid var(--border-color); border-radius: 12px; overflow: hidden; }
+.panel-header { padding: 14px 18px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; justify-content: space-between; }
+.panel-header h3 { margin: 0; font-size: 0.95rem; font-weight: 600; }
+.panel-body { padding: 18px; }
+.sched-row { display: flex; align-items: center; gap: 10px; padding: 10px 14px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; margin-bottom: 8px; }
+.toggle-switch { position: relative; width: 36px; height: 20px; flex-shrink: 0; }
+.toggle-switch input { opacity: 0; width: 0; height: 0; }
+.toggle-slider { position: absolute; inset: 0; background: #374151; border-radius: 20px; cursor: pointer; transition: .2s; }
+.toggle-slider:before { content:''; position: absolute; width: 14px; height: 14px; left: 3px; bottom: 3px; background: white; border-radius: 50%; transition: .2s; }
+input:checked + .toggle-slider { background: var(--color-primary); }
+input:checked + .toggle-slider:before { transform: translateX(16px); }
+</style>
+
+<div class="page-header">
+    <h2 class="page-title">Scheduled Scans</h2>
+    <p class="page-subtitle">Automatically re-scan assets on a recurring schedule</p>
+</div>
+
+<div class="sched-grid">
+    <!-- Create schedule -->
+    <div class="panel" style="align-self:start;">
+        <div class="panel-header"><h3>New Schedule</h3></div>
+        <div class="panel-body">
+            <div class="form-group" style="margin-bottom:12px;">
+                <label style="font-size:0.82rem;color:var(--color-muted);">Asset</label>
+                <select id="asset-sel" style="width:100%;margin-top:4px;padding:8px 10px;background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:6px;color:var(--color-text);">
+                    <option value="">Loading assets…</option>
+                </select>
+            </div>
+            <div class="form-group" style="margin-bottom:12px;">
+                <label style="font-size:0.82rem;color:var(--color-muted);">Interval</label>
+                <select id="interval-sel" style="width:100%;margin-top:4px;padding:8px 10px;background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:6px;color:var(--color-text);">
+                    <option value="6">Every 6 hours</option>
+                    <option value="12">Every 12 hours</option>
+                    <option value="24" selected>Every 24 hours</option>
+                    <option value="48">Every 48 hours</option>
+                    <option value="168">Every 7 days</option>
+                    <option value="720">Every 30 days</option>
+                </select>
+            </div>
+            <button class="btn btn-primary" style="width:100%;" onclick="createSchedule()">Create Schedule</button>
+            <div id="sched-status" style="margin-top:8px;font-size:0.82rem;"></div>
+        </div>
+    </div>
+
+    <!-- Schedule list -->
+    <div class="panel">
+        <div class="panel-header">
+            <h3>Active Schedules</h3>
+            <button class="btn btn-secondary" style="padding:4px 10px;font-size:0.78rem;" onclick="loadSchedules()">↻ Refresh</button>
+        </div>
+        <div class="panel-body" id="sched-list">
+            <p style="color:var(--color-muted);font-style:italic;">Loading…</p>
+        </div>
+    </div>
+</div>
+
+<script>
+async function loadAssets() {
+    const r = await fetch('/api/assets');
+    const d = await r.json();
+    const sel = document.getElementById('asset-sel');
+    sel.innerHTML = (d.assets||[]).map(a => `<option value="${a.id}">${escHtml(a.name)}</option>`).join('') || '<option value="">No assets found</option>';
+}
+
+async function loadSchedules() {
+    const r = await fetch('/api/schedules');
+    const d = await r.json();
+    const list = document.getElementById('sched-list');
+    const scheds = d.schedules || [];
+    if (!scheds.length) {
+        list.innerHTML = '<p style="color:var(--color-muted);font-style:italic;">No schedules yet.</p>';
+        return;
+    }
+    list.innerHTML = scheds.map(s => `
+        <div class="sched-row">
+            <label class="toggle-switch">
+                <input type="checkbox" ${s.enabled ? 'checked' : ''} onchange="toggleSchedule(${s.id}, this)">
+                <span class="toggle-slider"></span>
+            </label>
+            <div style="flex:1;min-width:0;">
+                <div style="font-weight:500;font-size:0.88rem;">${escHtml(s.asset_name)}</div>
+                <div style="font-size:0.75rem;color:var(--color-muted);">
+                    ${escHtml(s.label)} &nbsp;·&nbsp;
+                    Next: ${s.next_run_at ? new Date(s.next_run_at).toLocaleString() : '—'}
+                    ${s.last_run_at ? ' &nbsp;·&nbsp; Last: ' + new Date(s.last_run_at).toLocaleString() : ''}
+                </div>
+            </div>
+            <span style="font-size:0.75rem;padding:2px 8px;border-radius:12px;background:${s.enabled ? 'rgba(16,185,129,0.15)' : 'var(--bg-hover)'};color:${s.enabled ? '#10b981' : 'var(--color-muted)'};">${s.enabled ? 'Active' : 'Paused'}</span>
+            <button class="btn exception-btn" style="padding:4px 8px;font-size:0.75rem;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid #ef4444;" onclick="deleteSchedule(${s.id})">✕</button>
+        </div>`).join('');
+}
+
+async function createSchedule() {
+    const assetID = parseInt(document.getElementById('asset-sel').value);
+    const intervalH = parseInt(document.getElementById('interval-sel').value);
+    const status = document.getElementById('sched-status');
+    if (!assetID) { status.textContent = 'Select an asset'; status.style.color='#ef4444'; return; }
+    const r = await fetch('/api/schedules', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({asset_id: assetID, interval_h: intervalH})
+    });
+    if (r.ok) {
+        status.textContent = 'Schedule created'; status.style.color='#10b981';
+        loadSchedules();
+        setTimeout(() => status.textContent = '', 3000);
+    } else {
+        const d = await r.json();
+        status.textContent = d.error || 'Error'; status.style.color='#ef4444';
+    }
+}
+
+async function toggleSchedule(id, el) {
+    await fetch('/api/schedules/' + id + '/toggle', {method:'POST'});
+    loadSchedules();
+}
+
+async function deleteSchedule(id) {
+    if (!confirm('Delete this schedule?')) return;
+    await fetch('/api/schedules/' + id, {method:'DELETE'});
+    loadSchedules();
+}
+
+function escHtml(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+loadAssets();
+loadSchedules();
+</script>
+{{end}}

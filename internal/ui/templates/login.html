@@ -1,0 +1,47 @@
+{{define "title"}}Login — XPFarm{{end}}
+{{define "content"}}
+<style>
+    body { display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+    .login-wrap {
+        width: 360px;
+        background: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-radius: 14px;
+        padding: 36px 32px;
+        display: flex;
+        flex-direction: column;
+        gap: 20px;
+    }
+    .login-logo { font-size: 2rem; font-weight: 800; color: var(--color-primary); text-align: center; letter-spacing: 2px; }
+    .login-sub  { text-align: center; color: var(--color-muted); font-size: 0.88rem; margin-top: -10px; }
+    .login-wrap input[type=password] { width: 100%; padding: 10px 14px; background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; color: var(--color-text); font-size: 0.95rem; box-sizing: border-box; }
+    .login-wrap input:focus { outline: none; border-color: var(--color-primary); }
+    .login-wrap button { width: 100%; padding: 11px; background: var(--color-primary); color: #fff; border: none; border-radius: 8px; font-size: 0.95rem; font-weight: 600; cursor: pointer; }
+    .login-wrap button:hover { opacity: 0.88; }
+    #err { color: #ef4444; font-size: 0.85rem; text-align: center; display: none; }
+</style>
+<div class="login-wrap">
+    <div class="login-logo">XP Farm</div>
+    <div class="login-sub">Enter your password to continue</div>
+    <input type="password" id="pw" placeholder="Password" autofocus onkeydown="if(event.key==='Enter')login()">
+    <button onclick="login()">Sign In</button>
+    <div id="err">Incorrect password</div>
+</div>
+<script>
+async function login() {
+    const pw = document.getElementById('pw').value;
+    const r = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({password: pw})
+    });
+    if (r.ok) {
+        window.location.href = '/';
+    } else {
+        document.getElementById('err').style.display = 'block';
+        document.getElementById('pw').value = '';
+        document.getElementById('pw').focus();
+    }
+}
+</script>
+{{end}}
