@@ -1,0 +1,9 @@
+data/.xpfarm.key
+data/xpfarm.db
+data/xpfarm.db-shm
+data/xpfarm.db-wal
+screenshots/
+overlord/binaries/
+overlord/output/
+overlord/config/auth.json
+.git/

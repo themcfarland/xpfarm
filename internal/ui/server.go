@@ -121,7 +121,7 @@ func StartServer(port string) error {
 		return err
 	}
 
-	pages := []string{"dashboard.html", "assets.html", "asset_details.html", "target_details.html", "modules.html", "settings.html", "target.html", "overlord.html", "overlord_binary.html", "search.html", "advanced_scan.html", "scan_settings.html"}
+	pages := []string{"dashboard.html", "assets.html", "asset_details.html", "target_details.html", "modules.html", "settings.html", "target.html", "overlord.html", "overlord_binary.html", "search.html", "advanced_scan.html", "scan_settings.html", "reports.html", "planner.html", "workers.html", "graph.html", "asset.html", "index.html"}
 
 	for _, page := range pages {
 		pageContent, err := f.ReadFile("templates/" + page)
@@ -2708,8 +2708,12 @@ type MultiRender struct {
 }
 
 func (r MultiRender) Instance(name string, data any) render.Render {
+	tmpl, ok := r.templates[name]
+	if !ok || tmpl == nil {
+		panic(fmt.Sprintf("template %q not registered — add it to the pages slice in StartServer", name))
+	}
 	return render.HTML{
-		Template: r.templates[name],
+		Template: tmpl,
 		Name:     "layout.html", // Start execution at layout.html
 		Data:     data,
 	}
