@@ -93,10 +93,10 @@ async function loadRepos() {
             <h4>${repo.url}</h4>
             <div class="meta">Branch: ${repo.branch || 'main'} &nbsp;·&nbsp; Added: ${new Date(repo.created_at).toLocaleDateString()}</div>
             <div class="repo-actions">
-                <button class="btn btn-primary" style="padding:4px 10px;font-size:0.78rem;" onclick="scanRepo(${repo.id}, this)">▶ Scan</button>
-                <button class="btn btn-secondary" style="padding:4px 10px;font-size:0.78rem;" onclick="loadFindings(${repo.id}, '${escHtml(repo.url)}')">Findings</button>
-                <button class="btn btn-secondary" style="padding:4px 10px;font-size:0.78rem;" onclick="loadSBOM(${repo.id})">SBOM</button>
-                <button class="btn exception-btn" style="padding:4px 10px;font-size:0.78rem;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid #ef4444;" onclick="deleteRepo(${repo.id})">✕</button>
+                <button class="btn btn-primary" style="padding:4px 10px;font-size:0.78rem;" onclick="scanRepo('${repo.id}', this)">▶ Scan</button>
+                <button class="btn btn-secondary" style="padding:4px 10px;font-size:0.78rem;" onclick="loadFindings('${repo.id}', '${escHtml(repo.url)}')">Findings</button>
+                <button class="btn btn-secondary" style="padding:4px 10px;font-size:0.78rem;" onclick="loadSBOM('${repo.id}')">SBOM</button>
+                <button class="btn exception-btn" style="padding:4px 10px;font-size:0.78rem;background:rgba(239,68,68,0.1);color:#ef4444;border:1px solid #ef4444;" onclick="deleteRepo('${repo.id}')">✕</button>
             </div>
         </div>`).join('');
 }

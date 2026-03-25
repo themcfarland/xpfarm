@@ -40,6 +40,7 @@ import (
 	"xpfarm/internal/planner"
 	planstore "xpfarm/internal/storage/plans"
 	"xpfarm/internal/distributed/controller"
+	"xpfarm/internal/distributed/localworker"
 	jobstore "xpfarm/internal/storage/jobs"
 	workerstore "xpfarm/internal/storage/workers"
 	schedulestore "xpfarm/internal/storage/schedules"
@@ -2574,6 +2575,33 @@ func StartServer(port string) error {
 	// Instantiate the controller (starts background heartbeat monitor)
 	ctrl := controller.New(database.GetDB())
 	_ = ctrl // used by handlers below via closure
+
+	// Embedded local worker — can be started/stopped from the Workers UI.
+	lw := localworker.New(database.GetDB(), ctrl)
+
+	// POST /api/workers/local/start — launch the embedded local worker.
+	r.POST("/api/workers/local/start", func(c *gin.Context) {
+		if lw.IsRunning() {
+			c.JSON(http.StatusOK, gin.H{"status": "already_running"})
+			return
+		}
+		if err := lw.Start(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "started", "worker_id": localworker.LocalWorkerID})
+	})
+
+	// POST /api/workers/local/stop — stop the embedded local worker.
+	r.POST("/api/workers/local/stop", func(c *gin.Context) {
+		lw.Stop()
+		c.JSON(http.StatusOK, gin.H{"status": "stopped"})
+	})
+
+	// GET /api/workers/local/status — check if embedded worker is running.
+	r.GET("/api/workers/local/status", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"running": lw.IsRunning(), "worker_id": localworker.LocalWorkerID})
+	})
 
 	// workerAuth is a middleware that validates X-Worker-Token on worker-facing routes.
 	workerAuth := func(c *gin.Context) {

@@ -135,27 +135,39 @@
     <p class="page-subtitle">Distributed scan nodes and job queue management</p>
 </div>
 
-<!-- New Job Form -->
-<div class="panel job-form" style="flex-direction:row;">
-    <div class="form-field" style="flex:0 0 160px;">
-        <label>Tool</label>
-        <input type="text" id="jobTool" class="form-control" placeholder="subfinder" list="toolSuggestions">
-        <datalist id="toolSuggestions">
-            <option value="subfinder"><option value="naabu"><option value="httpx">
-            <option value="nmap"><option value="nuclei"><option value="katana">
-            <option value="urlfinder"><option value="gowitness"><option value="wappalyzer">
-            <option value="cvemap">
-        </datalist>
+<!-- Local Worker Banner + New Job Form -->
+<div class="panel" style="padding:16px 20px;margin-bottom:16px;overflow:visible;">
+    <!-- Local worker launch bar -->
+    <div id="local-worker-bar" style="width:100%;padding:10px 0 14px;border-bottom:1px solid var(--border-color);display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:200px;">
+            <span id="lw-status-dot" class="dot offline"></span>
+            <span id="lw-status-text" style="font-size:0.82rem;color:var(--color-text-muted);">Local worker not running</span>
+        </div>
+        <button id="lw-btn" class="btn-create" style="padding:6px 16px;" onclick="toggleLocalWorker()">▶ Launch Local Worker</button>
+        <span id="lw-msg" style="font-size:0.78rem;color:var(--color-text-muted);"></span>
     </div>
-    <div class="form-field" style="flex:1;">
-        <label>Target</label>
-        <input type="text" id="jobTarget" class="form-control" placeholder="example.com or 192.168.1.0/24">
+    <!-- New Job form row -->
+    <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;padding-top:14px;">
+        <div class="form-field" style="flex:0 0 160px;">
+            <label>Tool</label>
+            <input type="text" id="jobTool" class="form-control" placeholder="subfinder" list="toolSuggestions">
+            <datalist id="toolSuggestions">
+                <option value="subfinder"><option value="naabu"><option value="httpx">
+                <option value="nmap"><option value="nuclei"><option value="katana">
+                <option value="urlfinder"><option value="gowitness"><option value="wappalyzer">
+                <option value="cvemap">
+            </datalist>
+        </div>
+        <div class="form-field" style="flex:1;">
+            <label>Target</label>
+            <input type="text" id="jobTarget" class="form-control" placeholder="example.com or 192.168.1.0/24">
+        </div>
+        <div class="form-field" style="flex:0 0 auto;">
+            <label>&nbsp;</label>
+            <button class="btn-create" onclick="createJob()">+ Create Job</button>
+        </div>
+        <div id="jobMsg" style="align-self:center;font-size:0.8rem;color:var(--color-text-muted);"></div>
     </div>
-    <div class="form-field" style="flex:0 0 auto;">
-        <label>&nbsp;</label>
-        <button class="btn-create" onclick="createJob()">+ Create Job</button>
-    </div>
-    <div id="jobMsg" style="align-self:center;font-size:0.8rem;color:var(--color-text-muted);"></div>
 </div>
 
 <div class="workers-grid">
@@ -228,9 +240,49 @@
 document.addEventListener('DOMContentLoaded', () => {
     loadWorkers();
     loadJobs();
+    checkLocalWorker();
     // Auto-refresh every 15s
     setInterval(() => { loadWorkers(); loadJobs(); }, 15000);
+    setInterval(checkLocalWorker, 10000);
 });
+
+// ---- Local Worker ----
+let localWorkerRunning = false;
+
+async function checkLocalWorker() {
+    const res = await fetch('/api/workers/local/status');
+    const data = await res.json();
+    setLocalWorkerUI(data.running);
+}
+
+function setLocalWorkerUI(running) {
+    localWorkerRunning = running;
+    const dot = document.getElementById('lw-status-dot');
+    const text = document.getElementById('lw-status-text');
+    const btn = document.getElementById('lw-btn');
+    dot.className = 'dot ' + (running ? 'online' : 'offline');
+    text.textContent = running ? 'Local worker running — ready for jobs' : 'Local worker not running';
+    btn.textContent = running ? '■ Stop Local Worker' : '▶ Launch Local Worker';
+    btn.style.background = running ? '#374151' : '';
+}
+
+async function toggleLocalWorker() {
+    const btn = document.getElementById('lw-btn');
+    const msg = document.getElementById('lw-msg');
+    btn.disabled = true;
+    const endpoint = localWorkerRunning ? '/api/workers/local/stop' : '/api/workers/local/start';
+    const res = await fetch(endpoint, { method: 'POST' });
+    const data = await res.json();
+    btn.disabled = false;
+    if (!res.ok) {
+        msg.textContent = '✗ ' + (data.error || 'failed');
+        return;
+    }
+    msg.textContent = localWorkerRunning ? 'Stopped.' : 'Started — polling for jobs every 3s.';
+    setLocalWorkerUI(!localWorkerRunning);
+    setTimeout(() => { msg.textContent = ''; }, 4000);
+    loadWorkers();
+}
 
 // ---- Workers ----
 async function loadWorkers() {
@@ -240,7 +292,7 @@ async function loadWorkers() {
     document.getElementById('workerCount').textContent = `(${workers.length})`;
     const tbody = document.getElementById('workerBody');
     if (workers.length === 0) {
-        tbody.innerHTML = '<tr class="empty-row"><td colspan="6">No workers registered. Run <code>./xpfarm-worker -controller http://localhost:8888</code> on a remote machine.</td></tr>';
+        tbody.innerHTML = '<tr class="empty-row"><td colspan="6">No workers registered. Click <strong>▶ Launch Local Worker</strong> above to start one, or connect a remote node.</td></tr>';
         return;
     }
     tbody.innerHTML = workers.map(w => `
@@ -257,7 +309,7 @@ async function loadWorkers() {
             <td style="text-align:center;">${w.active_jobs}</td>
             <td style="font-size:0.75rem;color:var(--color-text-muted);">${relTime(w.last_seen)}</td>
             <td>
-                <button class="btn-sm" onclick="showWorkerDetail(${JSON.stringify(JSON.stringify(w))})">View</button>
+                <button class="btn-sm" data-json="${escH(JSON.stringify(w))}" onclick="showWorkerDetail(this)">View</button>
                 <button class="btn-sm danger" onclick="deleteWorker('${escH(w.id)}')">✕</button>
             </td>
         </tr>
@@ -270,8 +322,8 @@ async function deleteWorker(id) {
     loadWorkers();
 }
 
-function showWorkerDetail(jsonStr) {
-    const w = JSON.parse(jsonStr);
+function showWorkerDetail(btn) {
+    const w = JSON.parse(btn.dataset.json);
     document.getElementById('wdTitle').textContent = 'Worker: ' + w.id;
     document.getElementById('wdTable').innerHTML = `
         <tr><td>ID</td><td><code>${escH(w.id)}</code></td></tr>
@@ -307,7 +359,7 @@ async function loadJobs() {
             <td style="font-size:0.75rem;color:var(--color-text-muted);">${escH(j.worker_id||'—')}</td>
             <td style="font-size:0.75rem;color:var(--color-text-muted);">${relTime(j.created_at)}</td>
             <td>
-                <button class="btn-sm" onclick="showJobDetail(${JSON.stringify(JSON.stringify(j))})">View</button>
+                <button class="btn-sm" data-id="${escH(j.id)}" onclick="showJobDetail(this)">View</button>
                 <button class="btn-sm danger" onclick="deleteJob('${escH(j.id)}')">✕</button>
             </td>
         </tr>
@@ -340,8 +392,10 @@ async function deleteJob(id) {
     loadJobs();
 }
 
-function showJobDetail(jsonStr) {
-    const j = JSON.parse(jsonStr);
+async function showJobDetail(btn) {
+    const res = await fetch('/api/jobs/' + encodeURIComponent(btn.dataset.id));
+    if (!res.ok) return;
+    const j = await res.json();
     document.getElementById('jdTitle').textContent = 'Job: ' + j.id;
     const payload = j.payload || {};
     document.getElementById('jdTable').innerHTML = `

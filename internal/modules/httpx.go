@@ -130,7 +130,13 @@ func (h *Httpx) RunRich(ctx context.Context, urls []string) ([]HttpxResult, erro
 	return results, nil
 }
 
-// Run satisfies the Module interface but is not the primary entry point; use RunRich instead.
+// Run probes target with httpx and returns raw output.
 func (h *Httpx) Run(ctx context.Context, target string) (string, error) {
-	return "", fmt.Errorf("httpx: use RunRich() for rich analysis; Run() is not implemented")
+	path := utils.ResolveBinaryPath("httpx")
+	cmd := exec.CommandContext(ctx, path, "-u", target, "-title", "-status-code", "-tech-detect", "-silent")
+	out, err := cmd.CombinedOutput()
+	if err != nil && len(out) == 0 {
+		return "", fmt.Errorf("httpx: %v", err)
+	}
+	return string(out), nil
 }

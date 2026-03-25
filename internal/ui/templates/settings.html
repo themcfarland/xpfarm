@@ -364,6 +364,52 @@
     </script>
 </div>
 
+<div id="security-section" class="settings-section" style="display: none;">
+    <div class="card">
+        <h2>Access Control</h2>
+        <p style="color: var(--color-muted); margin-bottom: 20px;">Set or change the password required to access XPFarm.</p>
+        <div style="max-width: 420px;">
+            <div style="margin-bottom: 14px;">
+                <label style="display:block;color:var(--color-muted);margin-bottom:5px;font-size:0.9rem;">New Password</label>
+                <input type="password" id="new-password" placeholder="Enter new password" autocomplete="new-password"
+                    style="width:100%;padding:10px 12px;background:#050505;border:1px solid var(--border-color);border-radius:6px;color:white;outline:none;box-sizing:border-box;">
+            </div>
+            <div style="margin-bottom: 18px;">
+                <label style="display:block;color:var(--color-muted);margin-bottom:5px;font-size:0.9rem;">Confirm Password</label>
+                <input type="password" id="confirm-password" placeholder="Repeat new password" autocomplete="new-password"
+                    style="width:100%;padding:10px 12px;background:#050505;border:1px solid var(--border-color);border-radius:6px;color:white;outline:none;box-sizing:border-box;">
+            </div>
+            <button class="btn btn-primary" onclick="savePassword()">Update Password</button>
+            <div id="pw-status" style="margin-top:10px;font-size:0.84rem;"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+    async function savePassword() {
+        const pw = document.getElementById('new-password').value;
+        const confirm = document.getElementById('confirm-password').value;
+        const status = document.getElementById('pw-status');
+        if (!pw) { status.textContent = 'Password cannot be empty'; status.style.color = '#ef4444'; return; }
+        if (pw !== confirm) { status.textContent = 'Passwords do not match'; status.style.color = '#ef4444'; return; }
+        const r = await fetch('/api/settings/password', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({password: pw})
+        });
+        const d = await r.json();
+        if (r.ok) {
+            status.textContent = '✓ Password updated successfully';
+            status.style.color = '#10b981';
+            document.getElementById('new-password').value = '';
+            document.getElementById('confirm-password').value = '';
+        } else {
+            status.textContent = '✗ ' + (d.error || 'Failed to update password');
+            status.style.color = '#ef4444';
+        }
+    }
+</script>
+
 <script>
     function switchTab() {
         const params = new URLSearchParams(window.location.search);
@@ -375,6 +421,8 @@
             document.getElementById('notifications-section').style.display = 'block';
         } else if (tab === 'ai') {
             document.getElementById('ai-section').style.display = 'block';
+        } else if (tab === 'security') {
+            document.getElementById('security-section').style.display = 'block';
         } else {
             document.getElementById('env-section').style.display = 'block';
         }

@@ -31,9 +31,16 @@ func (n *Nmap) Install() error {
 	return fmt.Errorf("nmap must be installed manually")
 }
 
-// Run satisfies the Module interface but is not the primary entry point; use CustomScan instead.
+// Run performs a fast top-100 port scan against target and returns raw nmap output.
 func (n *Nmap) Run(ctx context.Context, target string) (string, error) {
-	return "", fmt.Errorf("nmap: use CustomScan() for service enumeration; Run() is not implemented")
+	path := utils.ResolveBinaryPath("nmap")
+	args := []string{"-Pn", "--top-ports", "100", "-T4", target}
+	cmd := exec.CommandContext(ctx, path, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return string(out), fmt.Errorf("nmap: %v\n%s", err, out)
+	}
+	return string(out), nil
 }
 
 // NmapRun XML Structures
