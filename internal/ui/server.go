@@ -3129,12 +3129,17 @@ func StartServer(port string) error {
 			EpssScore      float64 `json:"epss_score"`
 			EpssPercentile float64 `json:"epss_percentile"`
 			RiskScore      float64 `json:"risk_score"`
+			FpStatus       string  `json:"fp_status"`
 		}
 
 		severity := c.Query("severity")
 
 		var vulns []database.Vulnerability
-		q := db.Select("name, severity, template_id, matched_at")
+		showFP := c.Query("show_fp") == "true"
+		q := db.Select("name, severity, template_id, fp_status")
+		if !showFP {
+			q = q.Where("fp_status != 'false_positive'")
+		}
 		if severity != "" {
 			q = q.Where("LOWER(severity) = ?", strings.ToLower(severity))
 		}
@@ -3146,7 +3151,7 @@ func StartServer(port string) error {
 		for _, v := range vulns {
 			k := key{v.Name, v.TemplateID}
 			if _, ok := agg[k]; !ok {
-				agg[k] = &Row{Name: v.Name, Severity: v.Severity, TemplateID: v.TemplateID}
+				agg[k] = &Row{Name: v.Name, Severity: v.Severity, TemplateID: v.TemplateID, FpStatus: v.FpStatus}
 			}
 			agg[k].AffectedCount++
 		}

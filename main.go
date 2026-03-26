@@ -7,6 +7,7 @@ import (
 
 	"xpfarm/internal/core"
 	"xpfarm/internal/database"
+	"xpfarm/internal/mcp"
 	"xpfarm/internal/modules"
 	"xpfarm/internal/plugin"
 	"xpfarm/internal/ui"
@@ -129,6 +130,9 @@ ____  ________________________
 	// 5. Check and Index Nuclei Templates
 	utils.LogInfo("Checking Nuclei Templates version...")
 	go core.CheckAndIndexTemplates(database.GetDB())
+
+	// 5b. Start MCP server (port 8889) for AI client integration
+	go mcp.StartMCPServer(database.GetDB())
 
 	// 6. Start Web Server
 	port := "8888"

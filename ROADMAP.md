@@ -30,13 +30,14 @@
 | #3: Compound Risk Scoring | ✅ Done | 99f4f92 |
 | #9: Vision Analysis | ✅ Done | 99f4f92 |
 | #2: Passive Enrichment (GreyNoise) | ✅ Partial | 99f4f92 |
-| QW5: CISA KEV Nuclei Targeting | 🔄 In Progress | — |
-| QW6: OSV.dev Dependency Vulns | 🔄 In Progress | — |
-| QW8: LLM Auto-Report | 🔄 In Progress | — |
-| #1: LLM False-Positive Triage | 🔄 In Progress | — |
-| #4: MCP Server | 🔄 In Progress | — |
-| #15: Executive Report Generation | 🔄 In Progress | — |
-| #2: Shodan InternetDB passive recon | ⏳ Pending | — |
+| QW5: CISA KEV Nuclei Targeting | ✅ Done | fb28748 |
+| QW6: OSV.dev Dependency Vulns | ✅ Done | fb28748 |
+| QW7: Shodan InternetDB passive recon | ✅ Done | fb28748 |
+| QW8: LLM Auto-Report | ✅ Done | current |
+| #1: LLM False-Positive Triage | ✅ Done | current |
+| #4: MCP Server | ✅ Done | current |
+| #15: Executive Report Generation | ✅ Done (wired into QW8) | current |
+| #2: Shodan (full via InternetDB) | ✅ Done | fb28748 |
 | #5: ReAct Agent Loop | ⏳ Pending | — |
 | #6: AI Nuclei Template Generation | ⏳ Pending | — |
 | #7: Attack Graph Visualization | ⏳ Pending (graph pkg exists) | — |

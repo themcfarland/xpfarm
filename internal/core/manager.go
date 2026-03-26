@@ -16,6 +16,7 @@ import (
 	"xpfarm/internal/core/enrichment"
 	"xpfarm/internal/database"
 	"xpfarm/internal/modules"
+	"xpfarm/internal/reports"
 	"xpfarm/pkg/utils"
 
 	"gorm.io/gorm"
@@ -966,6 +967,9 @@ func (sm *ScanManager) runScanLogic(ctx context.Context, targetInput string, ass
 						if profile.EnableNuclei {
 							sm.runNucleiWithQuarantine(ctx, db, t, assetName)
 						}
+
+						// --- STAGE 8.5: LLM False-Positive Triage ---
+						enrichment.TriageNucleiFindings(db, t.ID)
 					}
 
 					// --- Checkpoint: mark this target fully processed ---
@@ -980,6 +984,20 @@ func (sm *ScanManager) runScanLogic(ctx context.Context, targetInput string, ass
 	} else {
 		utils.LogWarning("[Scanner] Naabu missing, draining pipeline...")
 		for range targetsChan {
+		}
+	}
+
+	// QW8: Auto-report generation after scan completes
+	if profile.EnableAutoReport && ctx.Err() == nil {
+		req := reports.ReportRequest{
+			AssetIDs: []uint{asset.ID},
+			Format:   reports.FormatMarkdown,
+			Title:    fmt.Sprintf("Auto-Report: %s", assetName),
+		}
+		if _, err := reports.GenerateReport(context.Background(), db, req, nil); err != nil {
+			utils.LogDebug("[AutoReport] Failed to generate report for asset %d: %v", asset.ID, err)
+		} else {
+			utils.LogSuccess("[AutoReport] Generated report for asset %s", assetName)
 		}
 	}
 

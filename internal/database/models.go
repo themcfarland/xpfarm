@@ -90,6 +90,8 @@ type Vulnerability struct {
 	MatcherName string         `gorm:"uniqueIndex:idx_vuln_unique" json:"matcher_name"`
 	Extracted   string         `json:"extracted_results"`
 	TemplateID  string         `gorm:"index:idx_vuln_template;uniqueIndex:idx_vuln_unique" json:"template_id"`
+	FpStatus    string         `json:"fp_status" gorm:"default:'pending'"` // "pending", "true_positive", "false_positive"
+	FpReason    string         `json:"fp_reason" gorm:"default:''"`
 	CreatedAt   time.Time      `json:"created_at"`
 	DeletedAt   gorm.DeletedAt `gorm:"index" json:"-"`
 }
